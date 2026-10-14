@@ -4,6 +4,7 @@ sdkconfig.old
 managed_components/
 .vscode/
 .idea/
+.DS_Store
 
 # Generated repository-local links; canonical skill sources live in skills/.
 /.agents/skills/passport-develop
@@ -11,3 +12,7 @@ managed_components/
 /.agents/skills/passport-build
 /.agents/skills/passport-device-test
 /.agents/skills/passport-debug
+
+# Artwork imported from the user's local Codex installation (not redistributed).
+/assets/images/codex-pet/
+__pycache__/

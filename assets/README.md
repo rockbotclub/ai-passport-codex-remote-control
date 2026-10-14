@@ -41,3 +41,15 @@ Store reusable music and sound-effect sources in `music/`.
 - Prefer 16 kHz, 16-bit mono PCM when it matches the current BSP audio path.
 - Check Flash and internal-RAM cost before embedding audio; stream or chunk long recordings.
 - Do not commit media without redistribution permission.
+
+## Local Codex pet artwork
+
+`images/codex-pet/source.webp` and `frames.inc` are imported from the user’s Codex installation by `tools/codex_pet/prepare_sprites.py`. The 31 RGB565 frames are 144 × 156 pixels and embedded directly in Flash. These files are Git-ignored; redistribution permission is not established. See [the application guide](../docs/codex-pet.md).
+
+The same importer generates `images/codex-pet/offline.inc`: a 216 × 144 one-bit
+bitmap containing the Chinese equivalents of “PC disconnected” and “Check the
+PC bridge” at 16/12 pixels,
+using local Arial Unicode or the explicitly supplied `--font`. Glyph coverage
+is checked before generation. It uses 3,888 Flash bytes and the existing UI list
+buffer. This font-derived asset is also Git-ignored; font and artwork
+redistribution permission is not established.

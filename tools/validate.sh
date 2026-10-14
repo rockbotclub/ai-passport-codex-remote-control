@@ -11,6 +11,10 @@ usage() {
 run_static_checks() {
     local actionlint_bin
     local test_dir
+    local gc_sections_flag="-Wl,--gc-sections"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        gc_sections_flag="-Wl,-dead_strip"
+    fi
 
     python3 tools/check_repo.py
 
@@ -24,6 +28,27 @@ run_static_checks() {
     "${actionlint_bin}" -color .github/workflows/*.yml
 
     test_dir="$(mktemp -d /tmp/ai-passport-host-tests.XXXXXX)"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_pet_state.c main/pet_state.c -o "${test_dir}/test_pet_state"
+    "${test_dir}/test_pet_state"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_pet_packet.c main/pet_packet.c main/pet_state.c -o "${test_dir}/test_pet_packet"
+    "${test_dir}/test_pet_packet"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_pet_provision.c main/pet_provision.c -o "${test_dir}/test_pet_provision"
+    "${test_dir}/test_pet_provision"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -I main tests/test_pet_button_policy.c main/pet_button_policy.c -o "${test_dir}/test_pet_button_policy"
+    "${test_dir}/test_pet_button_policy"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_pet_home.c main/pet_home.c -o "${test_dir}/test_pet_home"
+    "${test_dir}/test_pet_home"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_pet_control_layout.c -o "${test_dir}/test_pet_control_layout"
+    "${test_dir}/test_pet_control_layout"
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_bridge.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_interaction.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_new_chat.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_dashboard.py
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_ui_pixel_math.c main/ui_pixel_math.c \
         -o "${test_dir}/test_ui_pixel_math"
@@ -60,7 +85,7 @@ run_static_checks() {
     for demo in audio low_power ble wifi; do
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
             -ffunction-sections -fdata-sections -Itests/demo_stubs -Imain \
-            "tests/test_demo_${demo}_runtime.c" -Wl,--gc-sections \
+            "tests/test_demo_${demo}_runtime.c" "${gc_sections_flag}" \
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done

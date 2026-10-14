@@ -39,3 +39,13 @@
 - 与当前 BSP 音频路径匹配时优先采用 16 kHz、16 位单声道 PCM。
 - 嵌入音频前评估 Flash 与内部 RAM 成本；长录音应流式或分块。
 - 无再分发许可不提交媒体文件。
+
+## 本地 Codex 宠物素材
+
+`images/codex-pet/source.webp` 和 `frames.inc` 由 `tools/codex_pet/prepare_sprites.py` 从用户的 Codex 安装中导入。31 帧 RGB565 图像为 144 × 156 像素，直接嵌入 Flash。文件被 Git 忽略，尚未确认再分发授权。参见[应用指南](../docs/codex-pet.zh_CN.md)。
+
+同一导入工具生成 `images/codex-pet/offline.inc`：216 × 144 的单色位图，
+以 16/12 像素显示“电脑连接已断开”和“请检查电脑端连接程序”，使用本地 Arial
+Unicode 或通过 `--font` 明确指定的字体。生成前检查字符覆盖，占用 3,888 字节
+Flash，复用现有界面列表缓冲区。这份由字体生成的资源也被 Git 忽略；字体与
+宠物素材的再分发授权尚未确认。

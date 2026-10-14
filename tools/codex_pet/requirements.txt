@@ -1,0 +1,5 @@
+Pillow>=10,<14
+pyserial>=3.5,<4
+cryptography>=44,<51
+fonttools>=4.50,<5
+opencc-python-reimplemented>=0.1.7,<0.2
