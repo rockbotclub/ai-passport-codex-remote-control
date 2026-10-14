@@ -24,9 +24,15 @@ a traceback. Firmware source was unchanged and no image was flashed for this
 bridge correction. The device retains the deployed `df205d62...3dcb` archive
 identified in the following section.
 
-Build: PASS. Host tests: PASS. Device tests: NOT RUN for the corrected fill/send
-flow. Unverified: physical repeat recording, current PC-edit submission, and
-approval-time recording after this bridge update.
+The user confirmed successful transcription into the PC input, return to the
+session list and a separate Confirm send. Sanitized bridge diagnostics also
+observed three recording/release cycles with pending saves returning to the list
+without a fill error. The send result is user-confirmed; no transcript text was
+logged.
+
+Build: PASS. Host tests: PASS. Device tests: PASS for user-confirmed transcription,
+list return and Confirm sending. Unverified: submission after editing the PC
+text, approval confirmation and approval-time recording after this bridge update.
 
 Validation-only archive (not flashed):
 `build/firmware/159186e39f252d91dbd5719518e3f2d73b69909c527c8e345e7df3e9890d63d8/`.
