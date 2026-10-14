@@ -48,7 +48,7 @@ int main(void) {
     assert(pet_button_action(7,true,0,2)==PET_ACTION_NONE);
     for (unsigned mode=2;mode<=3;++mode) {
         assert(pet_button_action(mode,true,2,1)==PET_ACTION_OK);
-        assert(pet_button_action(mode,true,2,3)==(mode==2 ? PET_ACTION_RECORD : PET_ACTION_CONSUME));
+        assert(pet_button_action(mode,true,2,3)==PET_ACTION_RECORD);
         assert(pet_button_action(mode,false,2,1)==PET_ACTION_CONSUME);
         assert(pet_button_action(mode,true,1,3)==PET_ACTION_CANCEL);
         assert(pet_button_action(mode,true,0,3)==PET_ACTION_BACK);

@@ -38,7 +38,7 @@ pet_action_t pet_button_action(unsigned mode, bool fresh, unsigned key, unsigned
     if (!mode) return key == 2 && event == 1 ? PET_ACTION_PLAY : PET_ACTION_NONE;
     if (!fresh) return PET_ACTION_CONSUME;
     if (key == 0 && event == 3) return mode == 7 ? PET_ACTION_NEW : PET_ACTION_BACK;
-    if (key == 2 && event == 3) return mode <= 2 ? PET_ACTION_RECORD : PET_ACTION_CONSUME;
+    if (key == 2 && event == 3) return mode <= 3 ? PET_ACTION_RECORD : PET_ACTION_CONSUME;
     if (key == 1 && event == 3) return PET_ACTION_CANCEL;
     if (event != 1) return PET_ACTION_NONE;
     // Recover from speech errors with a click; consume it as dismissal only.

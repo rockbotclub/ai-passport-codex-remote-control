@@ -7,6 +7,89 @@ screen using the original blue Codex pet. Normal operation is wireless: the
 computer and AI Passport join the same 2.4 GHz Wi-Fi network, and the device runs
 from its battery. USB is needed for initial flashing or optional wired status.
 
+## Confirm and PC-input sending (2026-10-14)
+
+Clicking Confirm in a selected session now sends that chat's current PC input,
+including computer edits, without requiring a voice preview. Empty input sends
+nothing. On an approval, Confirm decides only the displayed request after all
+pages have been seen. Holding Confirm records and transcribes; existing-chat
+text fills the PC input and the card returns to the session list. During approval,
+recording restores the same request afterwards. No transcript is rendered or
+stored on the card; new-chat text stays only in bridge memory behind a generic
+ready notice. Selection, project navigation and pet wake remain unchanged.
+
+The complete ESP-IDF 5.5.3 gate and independent archive verification passed.
+The final focused interaction suite passed 83 tests; the full-dependency static
+suite passed all 115 bridge checks without skips. After the user's commit/flash
+request, the installed partition table passed MD5, bounds and non-overlap checks.
+Its 3 MB factory partition fits this image. Only application sectors `0x10000`
+through `0x2bcfff` were written, with write-hash verification. The bootloader,
+partition table, NVS, PHY and resource/identity partitions were retained.
+
+A bounded 25-second startup observation matched ELF prefix `c89576f50`, confirmed
+a station IP and overview delivery, and found no fault markers. Free heap/largest
+block were 72,552/63,488 bytes. The existing bridge reauthenticated and completed
+30 encrypted syncs without a traceback. The serial port was closed.
+
+Build: PASS. Host tests: PASS. Device tests: PASS for write integrity, matching
+startup, retained Wi-Fi/pairing and encrypted synchronization. Physical testing
+of the new button behavior remains pending.
+Unverified: physical button hints, approval-time recording, transcription/input
+acknowledgement, current PC-input sending and rich-input rejection on the device.
+
+Verified deployed archive:
+`build/firmware/df205d62acf74a0042610eb3a90dd29f815ff34d643ef7177ee57e840f3b3dcb/`.
+Merged-image SHA-256:
+`df205d62acf74a0042610eb3a90dd29f815ff34d643ef7177ee57e840f3b3dcb`.
+Matching ELF SHA-256:
+`c89576f5027f8f3409da8a812aa139942e213345a1e8e331ce48156ddea3ccc7`.
+The application is 2,804,256 bytes at `0x10000`, written through
+`/dev/cu.usbmodem21201`. It was built and validated as `7faffc9-dirty`; the commit
+records the corresponding source without rebuilding this approved artifact.
+This deployment used the archived application image; writing the merged image
+at `0x0` can reset stored data.
+
+## One voice instruction before Confirm (2026-10-14)
+
+Unconfirmed voice now remains one draft through waiting, automatic pet return,
+control reconnection and failed additions. Confirm sends the whole draft once.
+The full-dependency static gate passed, including 108 bridge checks without skips.
+The complete gate passed its host checks, but ESP-IDF configuration was blocked
+by the sandbox denying the component manager's process-tree query (`sysctl`).
+Both existing IDF Python environments use that query. No new validated firmware
+archive was produced; this correction changes only the bridge.
+
+Build: FAIL (environment restriction). Host tests: PASS. Device tests: NOT RUN.
+Unverified: physical multi-recording accumulation and one final desktop submission.
+The running bridge was retained because this sandbox denies local port binding;
+restart it from a local terminal to apply the correction. Unconfirmed voice is
+held only in memory and does not survive that bridge restart.
+
+## Fixed-height project and session rows (2026-10-14)
+
+Both lists use five fixed 44-pixel slots across their 224-pixel panel, with
+two pixels of padding at each end. Rows show only the project name or saved
+sidebar title; long names use a width-checked ellipsis and the selected row
+keeps the same height. Small lists retain empty slots. Session counts are
+omitted from the project list.
+
+The complete ESP-IDF 5.5.3 gate and full-dependency static checks passed,
+including 106 bridge checks without skips. The native five-entry bridge was
+restarted with its existing settings; authenticated device reconnection and
+30 encrypted syncs were observed without a traceback. This bridge-rendered
+layout uses the deployed 216-by-224 firmware format.
+
+Build: PASS. Host tests: PASS. Device tests: NOT RUN for physical list acceptance.
+Unverified: fixed row spacing, long-name ellipses and selection/scrolling on
+the actual screen. The local rendering preview covers these cases.
+
+Validation archive (not flashed):
+`build/firmware/4eceb5abf51b2834770cdec93e0e22f4c5466852f51cd7bb70bbdb4c4f57666a/`.
+Merged-image SHA-256:
+`4eceb5abf51b2834770cdec93e0e22f4c5466852f51cd7bb70bbdb4c4f57666a`.
+Matching ELF SHA-256:
+`6872dace7832300fa941e6f8c30ad485cc72c210f3847f0f58ab40272c92d31a`.
+
 ## Five-entry deployment (2026-10-14)
 
 After the user's flash approval, the current firmware/bridge source and test
@@ -230,7 +313,7 @@ remains available by holding DOWN on the pet screen. After 10 seconds without
 button activity, the pet returns even while Codex is working. Bridge heartbeats
 and turn-state changes do not extend this timeout. Recording and transcription
 stay visible until completion, then begin a fresh 10-second window. A sleeping
-voice preview or approval resumes its existing review without sending or deciding it.
+approval or new-chat draft resumes its existing screen without sending or deciding it.
 The bridge saves only the last chosen project/chat IDs in a private
 `codex-pet-selection.json` under its Codex directory, restoring them across control
 reconnections and bridge restarts. Archived or removed chats fall back to an available chat;
@@ -252,14 +335,19 @@ local CJK font at 11/12/14/15/16 pixels; unsupported titles explicitly request P
 review. No system font is bundled. USB-only operation retains the basic status view.
 
 The lists hide the pet and turn-state widgets and show up to five nearby entries
-in a 216-by-224 panel at y=45 below the header, retaining the 16-pixel font and
-20-pixel line spacing. The panel leaves nine pixels before the button hints at
-y=278. Review pages retain their 192-pixel crop at y=85. The selected
-entry can wrap its title onto two lines and has a full-width inverted card;
-selected chats also retain their short ID. List position counters are omitted.
-Project cards retain their saved-chat counts. Each chat row shows its
-actual Codex sidebar title and saved project name; the first user prompt is never
-used as its title. Unnamed chats and unassigned projects have explicit fallback labels.
+in a 216-by-224 panel at y=45 below the header, retaining the 16-pixel font.
+Both lists reserve five fixed 44-pixel rows, with two pixels of padding
+at both ends, filling the available list area vertically. Session rows show only
+the actual Codex sidebar title; project names and short IDs are omitted.
+Long titles are truncated by rendered width with an ellipsis, including the
+selected title, and every selected card has the same full-width, fixed-height
+highlight. Fewer than five entries leave empty slots without enlarging rows.
+The first user prompt is never used as a title. The panel leaves nine pixels
+before the button hints at y=278. Review pages retain their 192-pixel crop at
+y=85. Project rows show only the project name, using the same single-line
+ellipsis and fixed-height highlight; session counts are omitted.
+List position counters are omitted.
+Unnamed chats and unassigned projects have explicit fallback labels.
 Working, waiting for approval/input, and finished
 turns use different original animations. After five seconds without a valid
 heartbeat the state becomes offline. A finished turn means Codex stopped its
@@ -270,10 +358,10 @@ per-screen map for clicks, holds, recording release, Power, Wi-Fi setup, and
 automatic return behavior.
 
 Holding UP on a saved local project prepares a new device chat. Hold OK to record,
-release to transcribe, then click OK in preview to create the chat and send the
+release to transcribe, then click OK on the ready notice to create the chat and send the
 first voice message. The project stays pinned; list refresh and wake cannot send
-the draft to an existing chat. New-chat voice stays on the device before
-confirmation. No placeholder prompt is sent. `No project`, unavailable folders,
+the draft to an existing chat. New-chat voice stays in bridge memory before
+confirmation; the card does not receive the transcript. No placeholder prompt is sent. `No project`, unavailable folders,
 and equal roots belonging to different projects cannot use this shortcut.
 The current confirmation token is consumed before creation, so stale events or
 uncertain acknowledgement cannot automatically create or resend a chat.
@@ -347,8 +435,8 @@ the merged image at `0x0` can reset stored data.
 
 Without an interactive bridge, OK plays the pet animation and holding DOWN
 opens Wi-Fi setup. Long OK presses never approve a request. Session selection
-shows a short ID so identically named chats remain distinguishable. Recording
-and review pin the destination; buttons cannot switch it until completion or
+shows saved sidebar titles. Recording
+and transcription pin the destination; buttons cannot switch it until completion or
 cancellation. A displayed review token, rather than the latest unseen network
 update, accompanies every action. Confirmation consumes a review before sending;
 a missing desktop acknowledgement displays an uncertain outcome and never retries.
@@ -359,8 +447,8 @@ using a locally installed CJK font and transferred as a 216 × 224 one-bit image
 This control-panel size requires the matching bridge and firmware
 to be updated together; the independent home overview keeps its existing dimensions.
 The bridge checks the font's Unicode coverage before rendering;
-unsupported review text disables confirmation and directs the user to the PC.
-No fixed CJK menu subset is claimed to support arbitrary transcripts. Font files
+unsupported approval text disables confirmation and directs the user to the PC.
+Voice text is not rendered on the card and does not require card font coverage. Font files
 are not redistributed. The UI owns a small image buffer; PCM is streamed in
 1,024-byte chunks without retaining a complete recording on the ESP32-C3.
 
@@ -474,7 +562,7 @@ a crash with no terminal event becomes unknown after 30 minutes without hooks.
 Control, audio and rendered text use TCP 19285. A mutual HMAC challenge authenticates
 both peers with the pairing key; random client/server nonces derive separate
 AES-256-GCM keys for each direction and connection. Counters and authenticated
-records reject tampering/replay. A disconnect discards unfinished audio and reviews.
+records reject tampering/replay. A disconnect discards unfinished audio; bridge drafts resume after authenticated reconnection.
 Only the authenticated status sender identifies the desktop IP. Allow local UDP
 and TCP through the firewall; guest/client-isolated networks or leaving Wi-Fi
 range disconnect the companion. The computer bridge must remain running.
@@ -515,30 +603,41 @@ for its public-file root. If `whisper-server` is absent, `auto` uses the CLI; us
 `--asr-backend cli` to explicitly return to per-recording loading, or `server` to
 require the resident worker. A failed worker stops; the next recording can restart
 it. CLI temporary WAV/transcript files are private and deleted after conversion;
-a process crash may leave temporary files requiring manual cleanup. For existing chats, releasing OK
-transcribes the recording, displays the voice text on the device, and requests
-input filling for the selected desktop chat. Holding OK again in preview appends
-the next segment to the device's voice text. Clicking device OK sends that voice
-text to the selected chat, independently of the PC input. Recording and input
-filling do not start a turn. Voice submission does not require visiting every
-transcript page; tool approval still requires reviewing every page.
+a process crash may leave temporary files requiring manual cleanup.
+For existing chats, releasing OK transcribes and fills the selected PC input,
+then returns the card to the session list. Transcript text is never rendered or
+stored on the card. Clicking OK on that list sends the current PC input,
+including edits made on the computer, even when no voice was recorded. Empty
+or cleared PC input sends nothing; the bridge does not resend cached voice.
+Recording and filling do not start a turn. Only approval confirmation requires
+visiting every request page.
 
-For existing-chat recordings, the bridge does not read the PC draft, synchronize PC edits, wait for prefill
-acknowledgement, or infer whether the PC has sent or cleared its input. Each fill
-requests the entire voice transcript through the macOS existing-chat route,
-replacing any existing PC input rather than merging it. Only consecutive voice
-segments within the current preview accumulate; exiting or expiring the preview
-starts a fresh transcript on the next recording. PC editing, sending and clearing
-remain independent. A failed input-fill request retains the device transcript
-for review and explicit submission, without a PC-input error or automatic retry.
-Cancel, expiry and disconnect end device review without clearing the PC input.
-The route does not support insertion at the cursor or clearing the composer after
-device send; manage the retained PC input directly on the computer.
-The current review token is consumed before IPC submission, so stale or repeated
-confirmation cannot retry a send whose acknowledgement is uncertain. Check the
-selected chat on the PC if the send outcome is unknown. Actual input filling and
-voice submission remain desktop/device acceptance checks, not established by
-fake-desktop tests.
+Consecutive recordings accumulate in bridge memory until sending or leaving
+the selected chat. Each fill replaces the PC input with the accumulated voice;
+it does not insert at the cursor or merge PC edits. The bridge waits up to 2.5
+seconds for the selected persisted PC draft to match before returning to the list.
+A failed fill shows a dismissible error and never sends automatically; check
+the actual PC input if filling was not acknowledged. Failed or interrupted
+transcription keeps the preceding voice and PC text. Waiting, automatic
+pet return and authenticated control reconnection preserve this bridge draft;
+restarting the bridge loses it. No transcript or audio is written to the
+selection file. Prepared new chats keep their first voice message only in bridge
+memory and show a generic ready notice, without transcript text on the card.
+
+At each existing-chat confirmation, the bridge reads only the selected chat's
+persisted composer text and checks it again after finding the desktop owner.
+If it changed during confirmation, nothing is sent. Plain strings and plain
+paragraph/text/hard-break documents are supported; attachments, mentions and
+formatted input require submission on the PC. IPC sending can leave the PC input
+intact; manage it on the computer. The screen token is consumed before submission,
+so a repeated event cannot retry an uncertain send. Check the selected chat on
+the PC if the outcome is unknown.
+
+Holding OK during an approval also records and fills PC input, then restores the
+same request, page and review progress. It neither approves nor sends. Clicking
+OK on the restored approval confirms that request after every page has been
+seen. Actual filling, current-input submission and approval remain device and
+desktop acceptance checks.
 
 For existing chats the desktop adapter uses the local thread owner's coordination
 IPC and never resumes a second executor. Only a confirmed new-chat first message
@@ -915,7 +1014,7 @@ transcribe and fill the selected PC input, then click OK to send only the
 device's voice transcript. The bridge no longer reads persisted PC drafts,
 tracks PC edits/clears/submissions, waits for prefill acknowledgement, or checks
 for a loaded owner before recording. Consecutive recordings accumulate only
-voice text within the current preview; input filling replaces existing PC text.
+voice text within the current bridge draft; input filling replaces existing PC text.
 A failed fill retains the transcript. Explicit sending still consumes the review
 token before IPC, preventing retries with the same confirmation. The running
 bridge was restarted with its existing settings; authenticated device reconnect

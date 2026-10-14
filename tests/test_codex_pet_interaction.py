@@ -30,7 +30,13 @@ class Desktop:
     def new_status(self, identity): return dict(self.job)
     def owner(self, thread): raise AssertionError('Voice must not discover a desktop owner')
     def send(self, thread, text): self.sent.append((thread, text))
-    def draft(self, thread): raise AssertionError('Voice must not read PC input')
+    def draft(self, thread): return self.drafts.get(thread, '')
+    def send_draft(self, thread):
+        text = self.draft(thread)
+        if not isinstance(text, str): raise ValueError('Unsupported PC input')
+        if not text.strip(): return False
+        self.send(thread, text)
+        return True
     def stage(self, thread, text):
         self.drafts[thread] = text
         self.staged.append((thread, text))
@@ -38,8 +44,8 @@ class Desktop:
 class Renderer:
     def __init__(self): self.last = ''
     def pages(self, text): return text.split('|') or ['']
-    def bitmap(self, text, selection=None):
-        self.last, self.selection = text, selection
+    def bitmap(self, text, selection=None, fixed_rows=None):
+        self.last, self.selection, self.fixed_rows = text, selection, fixed_rows
         return bytes(PIXELS)
     def summary(self, text, count=1): return [text]
 
@@ -99,9 +105,8 @@ class ProjectNavigationTests(unittest.TestCase):
     def test_wake_resumes_voice_and_approval_without_submitting_or_denying(self):
         self.action('ok'); self.action('record'); self.review.transcript('draft')
         self.assertTrue(self.action('sessions'))
-        self.assertEqual(self.review.mode, 2)
+        self.assertEqual(self.review.mode, 1)
         self.assertEqual(self.desktop.sent, [])
-        self.action('back')
         pending = self.broker.add({'session_id':'one','tool_name':'Bash'})
         self.review.sync()
         self.assertTrue(self.action('sessions'))
@@ -112,7 +117,10 @@ class ProjectNavigationTests(unittest.TestCase):
         self.assertEqual(frame[0], 7)
         self.assertIsNone(self.review.target)
         self.assertNotIn('First', self.review.renderer.last)
-        self.assertIn('2 sessions', self.review.renderer.last)
+        self.assertEqual(self.review.renderer.last.splitlines(), ['Same name', 'Same name', 'Empty project'])
+        self.assertEqual(self.review.renderer.selection, (0, 1))
+        self.assertEqual(self.review.renderer.fixed_rows, LIST_ENTRIES)
+        self.assertNotIn('sessions', self.review.renderer.last)
         self.assertNotRegex(self.review.renderer.last, r'\[\d+/\d+\]')
         self.assertFalse(self.action('record'))
         self.assertEqual(self.desktop.created, [])
@@ -168,7 +176,7 @@ class ProjectNavigationTests(unittest.TestCase):
         self.assertEqual(self.desktop.staged, [])
         token = self.review.token
         self.assertTrue(self.review.action('ok', token))
-        self.assertEqual(self.desktop.new_sent, [('b', 'firstsecond')])
+        self.assertEqual(self.desktop.new_sent, [('b', 'first second')])
         self.assertEqual(self.review.mode, 8)
         self.assertFalse(self.review.action('ok', token))
         self.assertFalse(self.action('record'))
@@ -177,12 +185,15 @@ class ProjectNavigationTests(unittest.TestCase):
         self.action('ok'); self.assertFalse(self.action('new'))
         self.assertEqual(self.desktop.sent, [])
 
-    def test_new_cancel_empty_speech_and_timeout_do_not_create_a_chat(self):
+    def test_new_cancel_empty_speech_and_waiting_do_not_create_a_chat(self):
         self.action('new'); self.action('record'); self.review.transcript('')
         self.assertEqual(self.review.mode, 4)
         self.action('back'); self.assertTrue(self.action('record'))
         self.review.transcript('draft'); self.review.expires = 0; self.review.sync()
-        self.assertEqual((self.review.mode, self.review.target), (1, None))
+        self.assertEqual((self.review.mode, self.review.target, self.review.text), (2, None, 'draft'))
+        self.assertTrue(self.action('record')); self.review.transcript('continued')
+        self.assertEqual(self.review.text, 'draft continued')
+        self.action('cancel')
         self.action('back')
         self.assertEqual(self.review.mode, 7)
         self.assertIsNone(self.review.new_project)
@@ -226,9 +237,10 @@ class ProjectNavigationTests(unittest.TestCase):
         self.action('back'); self.assertEqual(self.review.mode, 7)
     def test_back_discards_voice_and_back_from_approval_denies_exact_request(self):
         self.action('ok'); self.action('record'); self.review.transcript('draft')
-        self.action('back'); self.assertEqual(self.review.mode, 1)
+        self.action('back'); self.assertEqual(self.review.mode, 7)
         self.assertEqual(self.desktop.drafts, {'one': 'draft'})
         self.assertEqual(self.review.text, '')
+        self.action('ok')
         pending = self.broker.add({'session_id':'one','tool_name':'Bash'})
         other = self.broker.add({'session_id':'other','tool_name':'Bash'})
         self.review.sync(); self.action('back')
@@ -253,83 +265,86 @@ class InteractionTests(unittest.TestCase):
         self.review.sync()
         self.review.action('ok', self.review.token)
     def action(self, name): return self.review.action(name, self.review.token)
-    def test_sessions_and_recording_pin_target_then_confirm_sends_voice_once(self):
-        self.assertEqual(self.review.target, 'one')
+    def test_confirm_from_sessions_sends_current_pc_input_once(self):
+        self.desktop.drafts['one'] = 'Typed on PC'
+        self.desktop.drafts['two'] = 'Other chat'
+        token = self.review.token
+        self.assertTrue(self.review.action('ok', token))
+        self.assertFalse(self.review.action('ok', token))
+        self.assertEqual(self.desktop.sent, [('one', 'Typed on PC')])
+
+    def test_transcript_returns_to_list_and_never_reaches_card_renderer(self):
         self.action('back'); self.action('down'); self.action('ok')
         self.assertEqual(self.review.target, 'two')
         self.assertTrue(self.action('record'))
         self.assertFalse(self.action('down'))
-        self.review.transcript('hello|world')
-        self.assertEqual(self.desktop.staged, [('two', 'hello|world')])
-        self.assertEqual(self.review.text, 'hello|world')
-        self.action('down')
-        token = self.review.token
-        self.assertTrue(self.review.action('ok', token))
-        self.assertEqual(self.desktop.sent, [('two', 'hello|world')])
-        self.assertFalse(self.review.action('ok', token))
+        self.review.transcript('private voice|second page')
+        self.assertEqual(self.desktop.staged, [('two', 'private voice|second page')])
+        self.assertEqual((self.review.mode, self.review.text), (1, ''))
+        self.review.screen()
+        self.assertEqual(self.review.renderer.last, 'Second')
+        self.assertEqual(self.review.renderer.fixed_rows, LIST_ENTRIES)
+        self.assertNotIn('private voice', ''.join(self.review.pages))
+        self.assertEqual(self.desktop.sent, [])
 
-    def test_pc_edits_do_not_change_transcript_token_or_trigger_reading(self):
-        self.desktop.drafts['one'] = 'existing PC draft'
+    def test_confirm_uses_pc_edits_instead_of_cached_voice(self):
         self.action('record'); self.review.transcript('voice only')
         token = self.review.token
-        for draft in ('edited on PC', {'attachments': ['file']}, ''):
-            self.desktop.drafts['one'] = draft
-            self.review.sync(); self.review.screen()
-            self.assertEqual((self.review.mode, self.review.text), (2, 'voice only'))
-            self.assertEqual(self.review.token, token)
+        self.desktop.drafts['one'] = 'Edited on PC'
+        self.review.sync(); self.review.screen()
+        self.assertEqual(self.review.token, token)
         self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', 'voice only')])
+        self.assertEqual(self.desktop.sent, [('one', 'Edited on PC')])
+        self.assertEqual(self.review.voice_text, '')
 
-    def test_multiple_recordings_accumulate_only_voice_and_ignore_pc_edits(self):
-        self.desktop.drafts['one'] = '已有指令。'
+    def test_empty_or_cleared_pc_input_does_not_resend_voice(self):
+        for draft in ('', '   '):
+            with self.subTest(draft=draft):
+                self.action('record'); self.review.transcript('voice')
+                self.desktop.drafts['one'] = draft
+                self.assertFalse(self.action('ok'))
+                self.assertEqual(self.review.mode, 1)
+        self.assertEqual(self.desktop.sent, [])
+
+    def test_multiple_recordings_accumulate_in_bridge_and_fill_pc_only(self):
         self.desktop.drafts['two'] = 'other chat'
         self.action('record'); self.review.transcript('第一段。')
-        self.assertEqual(self.review.text, '第一段。')
-        self.desktop.drafts['one'] = '电脑补充。'
-        self.assertTrue(self.action('record')); self.review.transcript('第二段。')
-        self.assertEqual(self.review.text, '第一段。第二段。')
+        self.action('record'); self.review.transcript('第二段。')
+        self.assertEqual(self.review.voice_text, '第一段。第二段。')
         self.assertEqual(self.desktop.staged, [('one', '第一段。'), ('one', '第一段。第二段。')])
         self.assertEqual(self.desktop.drafts['two'], 'other chat')
+        self.assertEqual((self.review.mode, self.review.text), (1, ''))
         self.assertTrue(self.action('ok'))
         self.assertEqual(self.desktop.sent, [('one', '第一段。第二段。')])
 
-    def test_empty_additional_recording_keeps_transcript_without_refilling(self):
+    def test_empty_additional_recording_keeps_pc_text_without_refilling(self):
         self.action('record'); self.review.transcript('first segment')
         self.action('record'); self.review.transcript('   ')
-        self.assertEqual((self.review.mode, self.review.text), (2, 'first segment'))
+        self.assertEqual((self.review.mode, self.review.text), (1, ''))
         self.assertEqual(self.desktop.staged, [('one', 'first segment')])
         self.assertTrue(self.action('ok'))
         self.assertEqual(self.desktop.sent, [('one', 'first segment')])
 
-    def test_cancel_keeps_pc_input_and_next_recording_starts_new_voice_text(self):
+    def test_back_keeps_pc_input_and_next_recording_starts_new_voice(self):
         self.action('record'); self.review.transcript('previous voice')
-        self.action('back')
+        self.action('back'); self.action('ok')
         self.assertEqual(self.desktop.drafts['one'], 'previous voice')
         self.action('record'); self.review.transcript('new voice')
-        self.assertEqual(self.review.text, 'new voice')
+        self.assertEqual(self.review.voice_text, 'new voice')
         self.assertEqual(self.desktop.staged[-1], ('one', 'new voice'))
         self.assertEqual(self.desktop.sent, [])
 
-    def test_desktop_submit_or_delete_does_not_affect_voice_preview(self):
-        self.action('record'); self.review.transcript('voice')
-        token = self.review.token
-        self.desktop.drafts.clear()
-        self.review.sync()
-        self.assertEqual((self.review.mode, self.review.text, self.review.token), (2, 'voice', token))
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', 'voice')])
-
-    def test_input_filling_failure_keeps_transcript_and_allows_more_voice(self):
+    def test_input_filling_failure_reports_error_and_preserves_pc_text(self):
         self.desktop.drafts['one'] = 'keep this'
         with patch.object(self.desktop, 'stage', side_effect=TimeoutError()) as stage:
             self.action('record'); self.review.transcript('new voice')
-            self.assertEqual((self.review.mode, self.review.text), (2, 'new voice'))
-            self.action('record'); self.review.transcript(' again')
-            self.assertEqual((self.review.mode, self.review.text), (2, 'new voiceagain'))
-            self.assertEqual(stage.call_count, 2)
+            self.assertEqual(self.review.mode, 4)
+            self.assertNotIn('new voice', self.review.text)
+            self.action('cancel')
+            self.assertEqual((self.review.mode, self.review.text), (1, ''))
+            stage.assert_called_once_with('one', 'new voice')
         self.assertEqual(self.desktop.drafts['one'], 'keep this')
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', 'new voiceagain')])
+        self.assertEqual(self.desktop.sent, [])
 
     def test_oversized_accumulated_voice_is_bounded_before_input_filling(self):
         self.action('record'); self.review.transcript('a' * 12000)
@@ -338,29 +353,156 @@ class InteractionTests(unittest.TestCase):
         self.assertFalse(self.action('ok'))
         self.assertEqual(len(self.desktop.staged), 1)
         self.assertEqual(self.desktop.sent, [])
+        self.action('cancel')
+        self.assertEqual((self.review.mode, self.review.text), (1, ''))
+        self.assertTrue(self.action('ok'))
+        self.assertEqual(self.desktop.sent, [('one', 'a' * 12000)])
 
-    def test_preview_expiry_starts_new_voice_without_reading_pc_input(self):
+    def test_waiting_and_wake_keep_voice_without_displaying_it(self):
         self.action('record'); self.review.transcript('old voice')
         self.review.expires = 0
-        self.review.sync()
-        self.assertEqual(self.review.mode, 1)
+        self.review.sync(); self.action('sessions')
         self.action('record'); self.review.transcript('fresh voice')
-        self.assertEqual(self.review.text, 'fresh voice')
-        self.assertEqual(self.desktop.staged[-1], ('one', 'fresh voice'))
+        self.assertEqual(self.review.voice_text, 'old voice fresh voice')
+        self.review.screen()
+        self.assertEqual(self.review.renderer.last, 'First')
+        self.assertTrue(self.action('ok'))
+        self.assertEqual(self.desktop.sent, [('one', 'old voice fresh voice')])
+        self.action('record'); self.review.transcript('next instruction')
+        self.assertEqual(self.review.voice_text, 'next instruction')
 
-    def test_list_displays_titles_projects_and_selection(self):
+    def test_voice_does_not_require_card_font_coverage(self):
+        from interaction import UnsupportedText
+        original = self.review.renderer.pages
+        def pages(text):
+            if '\U0010ffff' in text:
+                raise UnsupportedText('Unsupported text. View on PC.')
+            return original(text)
+        with patch.object(self.review.renderer, 'pages', side_effect=pages):
+            self.action('record'); self.review.transcript('voice \U0010ffff')
+        self.assertEqual((self.review.mode, self.review.text), (1, ''))
+        self.assertEqual(self.desktop.staged, [('one', 'voice \U0010ffff')])
+
+    def test_approval_confirm_never_sends_pc_input_and_hold_only_transcribes(self):
+        self.desktop.drafts['one'] = 'PC draft'
+        pending = self.broker.add({'session_id': 'one', 'tool_name': 'Bash',
+                                   'tool_input': {'command': 'first|second'}})
+        self.review.sync(); self.action('up')
+        self.assertTrue(self.action('record'))
+        self.review.transcript('voice during approval')
+        self.assertEqual((self.review.mode, self.review.page), (3, 1))
+        self.assertIsNone(pending['answer'])
+        self.assertEqual(self.desktop.sent, [])
+        self.assertEqual(self.desktop.drafts['one'], 'voice during approval')
+        self.assertTrue(self.action('ok'))
+        self.assertEqual(pending['answer'], 'allow')
+        self.assertEqual(self.desktop.sent, [])
+
+    def test_failed_approval_recording_restores_request_without_denying(self):
+        pending = self.broker.add({'session_id': 'one', 'tool_name': 'Bash'})
+        self.review.sync(); self.action('record')
+        self.review.recording_failed('Transcription failed.')
+        self.action('cancel')
+        self.assertEqual(self.review.mode, 3)
+        self.assertIsNone(pending['answer'])
+        self.assertEqual(self.desktop.sent, [])
+
+    def test_one_voice_instruction_survives_errors_waiting_and_encrypted_reconnections(self):
+        try: import cryptography
+        except ImportError: self.skipTest('Bridge requires cryptography')
+        import json
+        from interaction import InteractionServer
+        for new_chat in (False, True):
+            with self.subTest(new_chat=new_chat):
+                desktop = Desktop()
+                ready_mode = 2 if new_chat else 1
+                server = InteractionServer.__new__(InteractionServer)
+                server.key, server.desktop = 'a' * 32, desktop
+                server.broker, server.renderer = Broker(), Renderer()
+                server.active, server.target = threading.Lock(), None
+                server.selection = SelectionMemory()
+                outcomes = iter(('第一段。', ValueError('Inference failed'), '第二段。', '第三段。'))
+                def transcribe(pcm):
+                    result = next(outcomes)
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+                server.transcribe = transcribe
+                def connect():
+                    client, accepted = socket.socketpair()
+                    client.settimeout(2)
+                    worker = threading.Thread(target=server.handle, args=(accepted,))
+                    worker.start()
+                    return client, worker, SecureChannel(client, server.key)
+                def request(wire, command, token=''):
+                    wire.send(b'\x01' + json.dumps({'cmd': command, 'token': token}).encode())
+                    reply = wire.receive()
+                    self.assertEqual(len(reply), 17 + PIXELS)
+                    return reply[0], reply[1:17].hex()
+                def record(wire, token, expected):
+                    mode, token = request(wire, 'record', token)
+                    self.assertEqual(mode, 5)
+                    wire.send(b'\x02' + bytes(1024))
+                    mode, token = request(wire, 'stop', token)
+                    self.assertEqual(mode, expected)
+                    return token
+                client, worker, wire = connect()
+                try:
+                    mode, token = request(wire, 'sync'); self.assertEqual(mode, 7)
+                    mode, token = request(wire, 'new' if new_chat else 'ok', token)
+                    token = record(wire, token, ready_mode)
+                    server.review.expires = 0
+                    mode, token = request(wire, 'sync'); self.assertEqual(mode, ready_mode)
+                    token = record(wire, token, 4)
+                    mode, token = request(wire, 'cancel', token); self.assertEqual(mode, ready_mode)
+                    self.assertEqual((server.review.text if new_chat else server.review.voice_text), '第一段。')
+                    token = record(wire, token, ready_mode)
+                    self.assertEqual((server.review.text if new_chat else server.review.voice_text), '第一段。第二段。')
+                    stale = token
+                finally:
+                    client.close(); worker.join(2)
+                self.assertFalse(worker.is_alive())
+                client, worker, wire = connect()
+                try:
+                    mode, token = request(wire, 'sessions'); self.assertEqual(mode, ready_mode)
+                    self.assertNotEqual(token, stale)
+                    mode, token = request(wire, 'ok', stale); self.assertEqual(mode, ready_mode)
+                    mode, token = request(wire, 'record', token); self.assertEqual(mode, 5)
+                    wire.send(b'\x02' + bytes(1024))  # Lose only the unfinished addition.
+                finally:
+                    client.close(); worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(desktop.sent + desktop.new_sent, [])
+                client, worker, wire = connect()
+                try:
+                    mode, token = request(wire, 'sync'); self.assertEqual(mode, 4)
+                    mode, token = request(wire, 'cancel', token); self.assertEqual(mode, ready_mode)
+                    self.assertEqual((server.review.text if new_chat else server.review.voice_text), '第一段。第二段。')
+                    token = record(wire, token, ready_mode)
+                    self.assertEqual(desktop.sent + desktop.new_sent, [])
+                    mode, fresh = request(wire, 'ok', token)
+                    self.assertEqual(mode, 8 if new_chat else 1)
+                    request(wire, 'ok', token)
+                finally:
+                    client.close(); worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(desktop.new_sent if new_chat else desktop.sent,
+                                 [('Alpha' if new_chat else 'one', '第一段。第二段。第三段。')])
+
+    def test_session_list_displays_only_titles_in_five_fixed_slots(self):
         self.review.screen()
         content = self.review.renderer.last
         self.assertIn('First', content)
         self.assertNotRegex(content, r'\[\d+/\d+\]')
-        self.assertIn('Alpha', content)
+        self.assertNotIn('Alpha', content)
         self.assertNotIn('Second', content)
         self.assertNotIn('Beta', content)
-        self.assertEqual(self.review.renderer.selection,(0,2))
+        self.assertEqual(self.review.renderer.selection,(0,1))
+        self.assertEqual(self.review.renderer.fixed_rows, LIST_ENTRIES)
         self.action('back'); self.action('down'); self.action('ok'); self.review.screen()
         self.assertIn('Second', self.review.renderer.last)
         self.assertNotRegex(self.review.renderer.last, r'\[\d+/\d+\]')
-        self.assertEqual(self.review.renderer.selection,(0,2))
+        self.assertEqual(self.review.renderer.selection,(0,1))
     def test_stale_token_cannot_send_to_another_session(self):
         old = self.review.token
         self.action('down')
@@ -390,7 +532,7 @@ class InteractionTests(unittest.TestCase):
                 else: self.broker.invalidate('one')
                 self.assertFalse(self.review.action('ok', token))
                 self.assertIsNone(pending['answer'])
-    def test_recording_and_transcription_ignore_unavailable_pc_input_and_owner(self):
+    def test_review_delegates_filling_without_discovering_owner_or_submitting(self):
         with patch.object(self.desktop, 'owner', side_effect=EOFError()) as owner, \
                 patch.object(self.desktop, 'draft', side_effect=ValueError()) as draft, \
                 patch.object(self.desktop, 'send', side_effect=TimeoutError()) as send:
@@ -398,7 +540,7 @@ class InteractionTests(unittest.TestCase):
             self.review.transcript('hello')
             self.review.sync(); self.review.screen()
             owner.assert_not_called(); draft.assert_not_called(); send.assert_not_called()
-        self.assertEqual((self.review.mode, self.review.text), (2, 'hello'))
+        self.assertEqual((self.review.mode, self.review.text), (1, ''))
 
     def test_unknown_send_consumed_no_retry(self):
         self.action('record'); self.review.transcript('hello')
@@ -408,7 +550,7 @@ class InteractionTests(unittest.TestCase):
         self.assertFalse(self.action('ok'))
     def test_desktop_eof_during_send_is_uncertain_and_not_retried(self):
         self.action('record'); self.review.transcript('hello')
-        with patch.object(self.desktop,'send',side_effect=EOFError('Connection closed')) as send:
+        with patch.object(self.desktop,'send_draft',side_effect=EOFError('Connection closed')) as send:
             token=self.review.token
             self.assertTrue(self.review.action('ok',token))
             self.assertEqual(self.review.mode,4)
@@ -476,7 +618,7 @@ class InteractionTests(unittest.TestCase):
                             self.assertEqual(desktop.staged,[])
                             mode,token = request('record',token); self.assertEqual(mode,5)
                             wire.send(b'\x02'+bytes(1024))
-                            mode,token = request('stop',token); self.assertEqual(mode,2)
+                            mode,token = request('stop',token); self.assertEqual(mode,2 if new_chat else 1)
                             mode,token = request('cancel',token); self.assertEqual(mode,1)
                             mode,token = request('back',token); self.assertEqual(mode,7)
                             mode,token = request('down',token); self.assertEqual(mode,7)
@@ -536,7 +678,7 @@ class InteractionTests(unittest.TestCase):
             mode,token=request('ok',token);self.assertEqual(mode,1)
             mode,token=request('record',token);self.assertEqual(mode,5)
             wire.send(b'\x02'+bytes(1024))
-            mode,token=request('stop',token);self.assertEqual(mode,2)
+            mode,token=request('stop',token);self.assertEqual(mode,1)
             old=token
             mode,token=request('ok',token);self.assertEqual(mode,1)
             request('ok',old)
@@ -677,7 +819,7 @@ class RendererTests(unittest.TestCase):
         review.action('new', review.token)
         frame = review.screen()
         self.assertEqual(frame[0], 1)
-        content = next(text for (text, _) in renderer.cache if 'Hold OK to record.' in text)
+        content = next(text for (text, _, _) in renderer.cache if 'Hold OK to record.' in text)
         canvas = ImageDraw.Draw(Image.new('1',(216,144)))
         bounds = canvas.multiline_textbbox((4,0),content,font=renderer.font,spacing=2)
         self.assertLessEqual(bounds[2], 216)
@@ -719,7 +861,7 @@ class RendererTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer.bitmap('\n'.join(['Overflow'] * (limit + 1)), selection=(limit - 1, limit + 1))
 
-    def test_project_cards_fit_long_chinese_names_and_all_selection_positions(self):
+    def test_project_rows_fit_long_chinese_names_and_all_selection_positions(self):
         try:
             from interaction import Renderer as ActualRenderer
             renderer = ActualRenderer()
@@ -733,13 +875,17 @@ class RendererTests(unittest.TestCase):
             review.project = str(index)
             frame = review.screen(); lines, selected = review.project_rows()
             self.assertEqual(frame[0], 7); self.assertEqual(len(frame), 17 + PIXELS)
-            self.assertLessEqual(len(lines), HEIGHT // LIST_LINE_HEIGHT); self.assertIn('…', '\n'.join(lines))
+            self.assertEqual(len(lines), LIST_ENTRIES); self.assertIn('…', '\n'.join(lines))
+            self.assertEqual(selected[1] - selected[0], 1)
             self.assertNotRegex('\n'.join(lines), r'\[\d+/\d+\]')
-            self.assertEqual(lines.count('0 sessions'), LIST_ENTRIES)
+            self.assertNotIn('sessions', '\n'.join(lines))
             pixels = Image.frombytes('1', (WIDTH,HEIGHT), frame[17:])
+            row_height = HEIGHT // LIST_ENTRIES
+            top = (HEIGHT - LIST_ENTRIES * row_height) // 2
             for line in range(len(lines)):
-                self.assertEqual(bool(pixels.getpixel((0,line*20+10))), selected[0] <= line < selected[1])
-                self.assertEqual(bool(pixels.getpixel((215,line*20+10))), selected[0] <= line < selected[1])
+                y = top + line * row_height + row_height // 2
+                self.assertEqual(bool(pixels.getpixel((0,y))), selected[0] <= line < selected[1])
+                self.assertEqual(bool(pixels.getpixel((215,y))), selected[0] <= line < selected[1])
     def test_selected_chat_has_full_width_inverted_card_at_every_position(self):
         try:
             from interaction import Renderer as ActualRenderer
@@ -756,14 +902,74 @@ class RendererTests(unittest.TestCase):
             image=Image.frombytes('1',(WIDTH,HEIGHT),frame[17:])
             lines,selected=review.session_rows()
             first,end=selected
-            self.assertLessEqual(len(lines),HEIGHT // LIST_LINE_HEIGHT)
-            self.assertEqual(sum('AI Passport' in line for line in lines), LIST_ENTRIES)
+            self.assertEqual(len(lines), LIST_ENTRIES)
+            self.assertEqual(end - first, 1)
+            self.assertNotIn('AI Passport', '\n'.join(lines))
             self.assertNotRegex('\n'.join(lines), r'\[\d+/\d+\]')
+            row_height = HEIGHT // LIST_ENTRIES
+            top = (HEIGHT - LIST_ENTRIES * row_height) // 2
             for line in range(len(lines)):
-                self.assertEqual(bool(image.getpixel((0,line*20+10))),first <= line < end)
-                self.assertEqual(bool(image.getpixel((215,line*20+10))),first <= line < end)
-            self.assertEqual(renderer.bitmap('\n'.join(lines),selection=selected),frame[17:])
+                y = top + line * row_height + row_height // 2
+                self.assertEqual(bool(image.getpixel((0,y))),first <= line < end)
+                self.assertEqual(bool(image.getpixel((215,y))),first <= line < end)
+            self.assertEqual(renderer.bitmap('\n'.join(lines),selection=selected,
+                                             fixed_rows=LIST_ENTRIES),frame[17:])
             self.assertNotEqual(renderer.bitmap('\n'.join(lines)),frame[17:])
+
+    def test_both_lists_keep_fixed_rows_for_small_lists_and_long_names(self):
+        try:
+            from interaction import Renderer as ActualRenderer
+            renderer = ActualRenderer()
+        except (ImportError, OSError):
+            self.skipTest('Local CJK renderer unavailable')
+        from PIL import Image
+        titles = ['Short', '中文名称混合 English 123，' * 30,
+                  'W' * 300, 'Multiple\nlines\tstay on one row', '\U0010ffff']
+        desktop = Desktop()
+        row_height = HEIGHT // LIST_ENTRIES
+        top = (HEIGHT - LIST_ENTRIES * row_height) // 2
+        self.assertLessEqual(HEIGHT - LIST_ENTRIES * row_height, 4)
+        highlight_sizes = set()
+        for mode in (1, 7):
+            for count in range(1, LIST_ENTRIES + 1):
+                desktop.projects = lambda: [{'id': str(i), 'name': titles[i]} for i in range(count)]
+                desktop.sessions = lambda: [{'id': f'chat-{i}', 'title': titles[i], 'project_id': '0',
+                                             'project': 'Hidden project \U0010ffff'} for i in range(count)]
+                review = Review(desktop, Broker(), renderer); review.sync()
+                if mode == 1:
+                    review.action('ok', review.token)
+                previous_lines = None
+                for index in range(count):
+                    review.target = f'chat-{index}' if mode == 1 else None
+                    review.project = '0' if mode == 1 else str(index)
+                    frame = review.screen()
+                    lines, selection = review.session_rows() if mode == 1 else review.project_rows()
+                    self.assertEqual(len(lines), count)
+                    self.assertEqual(selection, (index, index + 1))
+                    self.assertNotIn('Hidden project', '\n'.join(lines))
+                    self.assertNotIn('chat-', '\n'.join(lines))
+                    self.assertNotIn('sessions', '\n'.join(lines))
+                    if previous_lines is not None:
+                        self.assertEqual(lines, previous_lines)
+                    previous_lines = lines
+                    for line in lines:
+                        self.assertNotIn('\n', line)
+                        self.assertLessEqual(renderer.font.getlength(line), WIDTH - 8)
+                    if count > 1:
+                        self.assertTrue(lines[1].endswith('…'))
+                    if count > 2:
+                        self.assertTrue(lines[2].endswith('…'))
+                    if count > 4:
+                        self.assertEqual(lines[4], 'Title: view on PC' if mode == 1 else 'Project: view on PC')
+                    pixels = Image.frombytes('1', (WIDTH, HEIGHT), frame[17:])
+                    highlighted = [y for y in range(HEIGHT) if pixels.getpixel((0, y))]
+                    self.assertTrue(highlighted)
+                    self.assertGreaterEqual(min(highlighted), top + index * row_height)
+                    self.assertLess(max(highlighted), top + (index + 1) * row_height)
+                    highlight_sizes.add(len(highlighted))
+                    # Every unused slot remains empty; short lists never stretch their rows.
+                    self.assertIsNone(pixels.crop((0, top + count * row_height, WIDTH, HEIGHT)).getbbox())
+        self.assertEqual(len(highlight_sizes), 1)
 
     def test_long_chinese_titles_and_projects_fit_list_and_review_panel(self):
         try:
@@ -776,13 +982,12 @@ class RendererTests(unittest.TestCase):
                                   'project':'中文项目名称'} for i in range(8)]
         review=Review(desktop,Broker(),renderer);review.sync();review.action('ok',review.token);review.action('down',review.token)
         review.screen();content=review.session_list()
-        self.assertLessEqual(len(content.splitlines()),HEIGHT // LIST_LINE_HEIGHT)
+        self.assertEqual(len(content.splitlines()), LIST_ENTRIES)
         bounds=ImageDraw.Draw(Image.new('1',(WIDTH,HEIGHT))).multiline_textbbox((4,0),content,font=renderer.font,spacing=LINE_SPACING)
         self.assertLessEqual(bounds[2],WIDTH);self.assertLessEqual(bounds[3],HEIGHT)
-        self.assertIn('中文项目名称',content)
+        self.assertNotIn('中文项目名称',content)
         self.assertIn('…',content)
         self.assertNotRegex(content, r'\[\d+/\d+\]')
-        self.assertEqual(content.count('中文项目名称'), LIST_ENTRIES)
         self.assertEqual(len(renderer.bitmap(content)),PIXELS)
         for page in renderer.pages('中文转写文字 '*100):
             bounds=ImageDraw.Draw(Image.new('1',(WIDTH,HEIGHT))).multiline_textbbox((4,0),page+'\n[1/99]',font=renderer.font,spacing=LINE_SPACING)
@@ -803,8 +1008,8 @@ class RendererTests(unittest.TestCase):
         with self.assertRaises(UnsupportedText): renderer.pages('\U0010ffff')
         review = Review(Desktop(), Broker(), renderer)
         review.sync();review.action('ok',review.token);review.change(2, '\U0010ffff')
-        self.assertEqual(review.mode, 4)
-        self.assertFalse(review.action('ok', review.token))
+        self.assertEqual(review.mode, 2)
+        self.assertNotIn('\U0010ffff', ''.join(review.pages))
         pending = review.broker.add({'session_id':review.target,'tool_name':'\U0010ffff'})
         review.change(3, pending['text'], pending['id'])
         self.assertEqual(review.mode,4)
@@ -841,7 +1046,7 @@ class TranscriberTests(unittest.TestCase):
         review.action('record',review.token)
         review.transcript(self.transcribe('現在又變成了繁體中文。'))
         self.assertEqual(desktop.drafts['one'], '继续输入。现在又变成了繁体中文。')
-        self.assertEqual(review.text, desktop.drafts['one'])
+        self.assertEqual(review.voice_text, desktop.drafts['one'])
         self.assertEqual(desktop.sent,[])
 
     def test_traditional_and_keep_are_explicit_options(self):
@@ -856,7 +1061,7 @@ class TranscriberTests(unittest.TestCase):
             review.action('record',review.token)
             review.transcript(self.transcribe(raw))
         self.assertEqual(desktop.drafts['one'], '第一句使用 Codex。Next sentence.这是第三句？')
-        self.assertEqual(review.text, desktop.drafts['one'])
+        self.assertEqual(review.voice_text, desktop.drafts['one'])
         self.assertEqual(desktop.sent,[])
 
     def test_terminators_quotes_empty_and_trailing_commas(self):
@@ -868,6 +1073,12 @@ class TranscriberTests(unittest.TestCase):
             with self.subTest(raw=raw):self.assertEqual(finish_sentence(raw),expected)
 
 class WhisperWorkerTests(unittest.TestCase):
+    def setUp(self):
+        # Processes and HTTP are mocked here; port reservation should also be
+        # independent of host network permissions.
+        self.reservation = self.enterContext(patch('speech.socket.socket')).return_value
+        self.reservation.getsockname.return_value = ('127.0.0.1', 1234)
+
     def test_reuses_owned_model_and_keeps_audio_on_loopback(self):
         from speech import WhisperWorker
         from unittest.mock import MagicMock
@@ -883,6 +1094,7 @@ class WhisperWorkerTests(unittest.TestCase):
                 self.assertEqual(worker(bytes(16000)),'Codex test')
                 self.assertEqual(worker(bytes(32000)),'Codex test')
                 self.assertEqual(popen.call_count,1)
+                self.reservation.bind.assert_called_once_with(('127.0.0.1', 0))
                 args=popen.call_args.args[0]
                 self.assertEqual(args[args.index('--host')+1],'127.0.0.1')
                 self.assertEqual(args[args.index('-mc')+1],'0')
@@ -983,32 +1195,39 @@ class DesktopReconnectTests(unittest.TestCase):
             'local:other': {'prompt': 'other draft', 'pullRequestChecks': []}}}}
         (Path(directory) / '.codex-global-state.json').write_text(json.dumps(state))
 
-    def test_stage_fills_only_voice_once_without_pc_state_or_acknowledgement(self):
+    def test_stage_fills_voice_once_and_waits_for_selected_pc_draft(self):
         from interaction import Desktop as ActualDesktop
         from urllib.parse import urlparse, parse_qs
         with tempfile.TemporaryDirectory() as directory:
             desktop = ActualDesktop(directory)
             self.write_draft(directory, 'existing PC text')
-            state = Path(directory) / '.codex-global-state.json'
-            for stored in (state.read_text(), 'invalid JSON'):
-                state.write_text(stored)
-                with patch('interaction.sys.platform', 'darwin'), \
-                        patch.object(desktop, 'owner', side_effect=EOFError()) as owner, \
-                        patch.object(desktop, 'request') as request, \
-                        patch('interaction.time.sleep') as sleep, \
-                        patch('interaction.subprocess.run') as launch, \
-                        patch.object(Path, 'read_text', side_effect=AssertionError('Must not read PC state')):
-                    desktop.stage('one/encoded', 'voice & +\nnext')
-                    launch.assert_called_once(); owner.assert_not_called()
-                    request.assert_not_called(); sleep.assert_not_called()
-                    route = urlparse(launch.call_args.args[0][-1])
-                    self.assertEqual((route.scheme, route.netloc, route.path), ('codex', 'threads', '/one%2Fencoded'))
-                    self.assertEqual(parse_qs(route.query), {'prompt': ['voice & +\nnext']})
-                    self.assertEqual(launch.call_args.args[0][:3], ['open', '-b', 'com.openai.codex'])
-                    self.assertEqual(launch.call_args.kwargs['timeout'], 5)
-                self.assertEqual(state.read_text(), stored)
+            def fill(*args, **kwargs):
+                self.write_draft(directory, 'voice & +\nnext')
+            with patch('interaction.sys.platform', 'darwin'), \
+                    patch.object(desktop, 'owner') as owner, \
+                    patch.object(desktop, 'request') as request, \
+                    patch('interaction.subprocess.run', side_effect=fill) as launch:
+                desktop.stage('one', 'voice & +\nnext')
+                launch.assert_called_once(); owner.assert_not_called(); request.assert_not_called()
+                route = urlparse(launch.call_args.args[0][-1])
+                self.assertEqual((route.scheme, route.netloc, route.path), ('codex', 'threads', '/one'))
+                self.assertEqual(parse_qs(route.query), {'prompt': ['voice & +\nnext']})
+                self.assertEqual(launch.call_args.kwargs['timeout'], 5)
 
-    def test_filling_error_preserves_voice_preview_without_ipc_or_retry(self):
+    def test_unacknowledged_fill_reports_error_without_stale_submission(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            self.write_draft(directory, 'old PC text')
+            with patch('interaction.sys.platform', 'darwin'), \
+                    patch('interaction.subprocess.run') as launch, \
+                    patch('interaction.time.monotonic', side_effect=[0, 3]), \
+                    self.assertRaises(TimeoutError):
+                desktop.stage('one', 'new voice')
+            launch.assert_called_once()
+            self.assertEqual(desktop.draft('one'), 'old PC text')
+
+    def test_filling_error_returns_dismissible_error_without_ipc_or_retry(self):
         from interaction import Desktop as ActualDesktop
         import subprocess
         for error in (OSError(), subprocess.TimeoutExpired('open', 5), subprocess.CalledProcessError(1, 'open')):
@@ -1021,11 +1240,14 @@ class DesktopReconnectTests(unittest.TestCase):
                         patch('interaction.subprocess.run', side_effect=error) as launch:
                     review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
                     self.assertTrue(review.action('record', review.token)); review.transcript('voice')
-                    self.assertEqual((review.mode, review.text), (2, 'voice'))
+                    self.assertEqual(review.mode, 4)
+                    self.assertNotIn('voice', review.text)
                     review.sync(); review.screen()
                     launch.assert_called_once(); request.assert_not_called()
+                    review.action('cancel', review.token)
+                    self.assertEqual(review.mode, 1)
 
-    def test_confirm_sends_only_device_transcript_without_pc_draft_or_ack(self):
+    def test_confirm_reads_latest_selected_pc_draft_without_recording(self):
         from interaction import Desktop as ActualDesktop
         with tempfile.TemporaryDirectory() as directory:
             desktop = ActualDesktop(directory)
@@ -1033,23 +1255,59 @@ class DesktopReconnectTests(unittest.TestCase):
             with patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
                     patch.object(desktop, 'projects', return_value=Desktop().projects()), \
                     patch.object(desktop, 'owner', return_value='owner') as owner, \
-                    patch.object(desktop, 'request') as request, \
-                    patch('interaction.sys.platform', 'darwin'), patch('interaction.subprocess.run') as launch, \
-                    patch('interaction.time.sleep') as sleep:
+                    patch.object(desktop, 'request') as request:
                 review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
-                review.action('record', review.token); review.transcript('voice only')
-                owner.assert_not_called(); request.assert_not_called()
                 token = review.token
                 self.write_draft(directory, 'edited on PC')
-                review.sync(); self.assertEqual(review.token, token)
                 self.assertTrue(review.action('ok', token))
                 self.assertFalse(review.action('ok', token))
                 owner.assert_called_once_with('one'); request.assert_called_once()
                 method, params, version, target = request.call_args.args
                 self.assertEqual((method, version, target), ('thread-follower-start-turn', 2, 'owner'))
                 self.assertEqual(params['conversationId'], 'one')
-                self.assertEqual(params['turnStart']['request']['input'][0]['text'], 'voice only')
-                launch.assert_called_once(); sleep.assert_not_called()
+                self.assertEqual(params['turnStart']['request']['input'][0]['text'], 'edited on PC')
+
+    def test_empty_pc_input_and_edit_during_owner_discovery_do_not_send(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            with patch.object(desktop, 'request') as request, patch.object(desktop, 'owner') as owner:
+                self.write_draft(directory, '   ')
+                self.assertFalse(desktop.send_draft('one'))
+                owner.assert_not_called()
+                self.write_draft(directory, 'before')
+                owner.side_effect = lambda thread: self.write_draft(directory, 'after') or 'owner'
+                with self.assertRaises(ValueError): desktop.send_draft('one')
+                request.assert_not_called()
+
+    def test_pc_rich_document_preserves_paragraphs_and_rejects_mentions(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            prompt = {'document': {'type': 'doc', 'content': [
+                {'type': 'paragraph', 'content': [{'type': 'text', 'text': '中文 ABC'},
+                                                 {'type': 'hardBreak'}, {'type': 'text', 'text': '123'}]},
+                {'type': 'paragraph', 'content': [{'type': 'text', 'text': 'next'}]}]},
+                      'plainTextMode': True}
+            self.write_draft(directory, prompt)
+            self.assertEqual(desktop.draft('one'), '中文 ABC\n123\nnext')
+            prompt['document']['content'][0]['content'].append({'type': 'mention', 'attrs': {'id': 'file'}})
+            self.write_draft(directory, prompt)
+            with self.assertRaises(ValueError): desktop.draft('one')
+
+    def test_malformed_selected_draft_does_not_send_or_crash_control_handler(self):
+        from interaction import Desktop as ActualDesktop
+        malformed = (None, [], {'document': {'type': 'doc', 'content': None}},
+                     {'document': {'type': 'doc', 'content': [{'type': 'paragraph', 'content': None}]}},
+                     {'document': {'type': 'doc', 'content': ['invalid paragraph']}})
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            with patch.object(desktop, 'request') as request:
+                for value in malformed:
+                    with self.subTest(value=value):
+                        self.write_draft(directory, value)
+                        with self.assertRaises(ValueError): desktop.send_draft('one')
+                request.assert_not_called()
 
     def test_empty_or_oversized_voice_never_launches_input_filling(self):
         from interaction import Desktop as ActualDesktop
@@ -1174,7 +1432,8 @@ class DesktopReconnectTests(unittest.TestCase):
                 review = Review(desktop, Broker(), Renderer())
                 review.project = 'server'
                 review.screen()
-                self.assertIn('2 sessions', review.renderer.last)
+                self.assertIn('Saved project', review.renderer.last)
+                self.assertNotIn('sessions', review.renderer.last)
                 self.assertTrue(review.action('ok', review.token))
                 review.screen()
                 self.assertIn('First saved chat', review.renderer.last)

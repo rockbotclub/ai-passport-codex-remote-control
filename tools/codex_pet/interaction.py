@@ -1,8 +1,8 @@
 """Local desktop IPC adapter, physical approval broker and encrypted voice transport.
 
 Existing-chat IPC never starts a second executor. New chats use one fresh CLI turn.
-Voice transcribes and fills the selected chat without reading its PC input.
-Only a physical Confirm with the current review token can send voice or approve.
+Voice fills the selected PC composer without sending transcript text to the card.
+Only a physical Confirm with the current screen token can send the PC draft or approve.
 """
 from contextlib import closing
 import hmac
@@ -284,8 +284,75 @@ class Desktop:
             'context': {'inheritThreadSettings': True}}}
         return self.request('thread-follower-start-turn', request, 2, owner)
 
+    def draft(self, thread):
+        """Read only the selected chat's persisted plain-text composer draft."""
+        state = self.project_state().get('electron-persisted-atom-state', {})
+        if not isinstance(state, dict):
+            raise ValueError('Unsupported composer state')
+        drafts = state.get('composer-prompt-drafts-v2', {})
+        if not isinstance(drafts, dict):
+            raise ValueError('Unsupported composer drafts')
+        value = drafts.get('local:' + thread)
+        if value is None:
+            return ''
+        if isinstance(value, dict) and 'draft' in value:
+            value = value['draft']
+        if isinstance(value, dict) and 'prompt' in value:
+            if any(v for k, v in value.items() if k not in ('prompt', 'pullRequestChecks')) or value.get('pullRequestChecks'):
+                raise ValueError('Submit attached or structured input on PC')
+            value = value['prompt']
+        if isinstance(value, str):
+            text = value
+        elif isinstance(value, dict) and isinstance(value.get('document'), dict):
+            document = value['document']
+            if document.get('type') != 'doc':
+                raise ValueError('Unsupported composer document')
+            content = document.get('content', [])
+            if not isinstance(content, list):
+                raise ValueError('Unsupported composer content')
+            paragraphs = []
+            for paragraph in content:
+                if not isinstance(paragraph, dict) or paragraph.get('type') != 'paragraph':
+                    raise ValueError('Submit formatted input on PC')
+                parts = []
+                nodes = paragraph.get('content', [])
+                if not isinstance(nodes, list):
+                    raise ValueError('Unsupported composer paragraph')
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        raise ValueError('Unsupported composer node')
+                    if node.get('type') == 'text' and isinstance(node.get('text'), str) and not node.get('marks'):
+                        parts.append(node['text'])
+                    elif node.get('type') == 'hardBreak':
+                        parts.append('\n')
+                    else:
+                        raise ValueError('Submit mentions or formatted input on PC')
+                paragraphs.append(''.join(parts))
+            text = '\n'.join(paragraphs)
+        else:
+            raise ValueError('Unsupported composer draft')
+        if len(text) > 12000:
+            raise ValueError('Composer text too long')
+        return text
+
+    def send_draft(self, thread):
+        """Submit the current PC text once, never fall back to cached voice."""
+        if self.new_chats.owns(thread):
+            raise RuntimeError('The first CLI turn is still running')
+        text = self.draft(thread)
+        if not text.strip():
+            return False
+        owner = self.owner(thread)
+        if self.draft(thread) != text:
+            raise ValueError('PC input changed during confirmation')
+        request = {'conversationId': thread, 'turnStart': {
+            'request': {'threadId': thread, 'input': [{'type': 'text', 'text': text, 'text_elements': []}]},
+            'context': {'inheritThreadSettings': True}}}
+        self.request('thread-follower-start-turn', request, 2, owner)
+        return True
+
     def stage(self, thread, text):
-        """Fill voice text once, without reading or acknowledging the PC input."""
+        """Fill voice once and wait briefly for the selected PC draft to match."""
         if sys.platform != 'darwin':
             raise RuntimeError('Desktop composer integration currently requires macOS')
         if not text.strip() or len(text) > 12000:
@@ -295,6 +362,13 @@ class Desktop:
         url = 'codex://threads/' + quote(thread, safe='') + '?' + urlencode({'prompt': text})
         subprocess.run(['open', '-b', 'com.openai.codex', url], check=True, timeout=5,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 2.5
+        while True:
+            if self.draft(thread) == text:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError('PC input fill not acknowledged')
+            time.sleep(0.05)
 
 
 
@@ -430,9 +504,9 @@ class Renderer:
         # The seventh visible line is reserved for the review page number.
         return ['\n'.join(lines[i:i+6]) for i in range(0, len(lines), 6)] or ['']
 
-    def bitmap(self, text, selection=None):
+    def bitmap(self, text, selection=None, fixed_rows=None):
         from PIL import Image, ImageDraw
-        key = (text, selection)
+        key = (text, selection, fixed_rows)
         if key in self.cache:
             return self.cache[key]
         image = Image.new('1', (WIDTH, HEIGHT))
@@ -440,19 +514,23 @@ class Renderer:
         if selection is None:
             draw.multiline_text((4, 0), text, font=self.font, fill=1, spacing=LINE_SPACING)
         else:
-            # Five entries use at most eleven lines, including the selected title's wrap.
-            # Invert the whole selected chat (title and project), not just its marker.
+            # Both lists reserve five equal slots even when fewer entries exist.
             lines = text.split('\n')
             first, end = selection
-            if not 0 <= first < end <= len(lines) <= HEIGHT // LIST_LINE_HEIGHT:
+            if fixed_rows is not None and not 1 <= fixed_rows <= HEIGHT:
+                raise ValueError('Invalid fixed row count')
+            row_height = HEIGHT // fixed_rows if fixed_rows else LIST_LINE_HEIGHT
+            top = (HEIGHT - fixed_rows * row_height) // 2 if fixed_rows else 0
+            limit = fixed_rows or HEIGHT // row_height
+            if not 0 <= first < end <= len(lines) <= limit:
                 raise ValueError('Invalid selected chat layout')
-            draw.rounded_rectangle((0, first * LIST_LINE_HEIGHT, WIDTH - 1,
-                                    end * LIST_LINE_HEIGHT - 1), radius=5, fill=1)
+            draw.rounded_rectangle((0, top + first * row_height, WIDTH - 1,
+                                    top + end * row_height - 1), radius=5, fill=1)
             for index, line in enumerate(lines):
                 bounds = draw.textbbox((0, 0), line, font=self.font, anchor='lt')
-                if bounds[2] > WIDTH - 8 or bounds[3] > LIST_LINE_HEIGHT:
+                if bounds[2] > WIDTH - 8 or bounds[3] > row_height:
                     raise ValueError('Selected chat text exceeds panel')
-                draw.text((4, index * LIST_LINE_HEIGHT + (LIST_LINE_HEIGHT - bounds[3]) // 2), line,
+                draw.text((4, top + index * row_height + (row_height - bounds[3]) // 2), line,
                           font=self.font, anchor='lt', fill=0 if first <= index < end else 1)
         result = image.tobytes()
         if len(self.cache) > 50:
@@ -461,7 +539,7 @@ class Renderer:
         return result
 
     def summary(self, text, count=1):
-        """Fit metadata to a row without slicing Unicode at an arbitrary length."""
+        """Fit display text to rows by rendered width, preserving Unicode characters."""
         text = ' '.join(text.split())
         lines = self.pages(text)[0].split('\n')
         if len(lines) > count:
@@ -529,6 +607,10 @@ class Review:
         self.expires = 0
         self.refresh_at = 0
         self.recording_text = ''
+        self.recovery_text = ''
+        self.voice_text = ''
+        self.voice_target = None
+        self.recording_review = None
         self.new_project = None
         self.new_job = None
 
@@ -571,7 +653,7 @@ class Review:
         self.mode, self.text, self.pending = mode, text, pending
         self.token = uuid.uuid4().hex
         try:
-            self.pages = self.renderer.pages(text)
+            self.pages = self.renderer.pages('Voice ready.\nOK: send first message\nHold OK: add voice' if mode == 2 else text)
         except UnsupportedText as error:
             self.mode, self.text = 4, ''
             self.pages = self.renderer.pages(str(error))
@@ -581,7 +663,8 @@ class Review:
 
     def sync(self):
         now = time.monotonic()
-        if self.mode in (2, 3) and (now >= self.expires or (self.pending and not self.broker.find(self.target))):
+        # Only approvals expire. Waiting does not discard bridge voice drafts.
+        if self.mode == 3 and (now >= self.expires or not self.broker.find(self.target)):
             self.change(1)
         if self.new_project is not None:
             return  # Pin the new-chat draft; never fall back to an existing session.
@@ -615,7 +698,7 @@ class Review:
         self.sync()
         if command == 'sessions':
             # Wake is navigation only: a refreshed list token must not prevent
-            # opening it. Voice/approval screens resume without any confirmation.
+            # opening it. New-chat/approval screens resume without confirmation.
             if self.mode == 5:
                 return False
             if self.new_project is not None:
@@ -646,12 +729,21 @@ class Review:
                 self.last_targets[self.project] = self.target
             self.target = None
             self.new_project = None
+            self.voice_text, self.voice_target = '', None
             self.change(7)
         elif command in ('cancel', 'back'):
+            if self.mode == 4 and self.recording_review is not None:
+                self.restore_approval()
+                return True
             if self.pending:
                 self.broker.resolve(self.pending, self.target, 'deny')
+            discard_voice = self.mode != 4
             self.new_job = None
-            self.change(self.return_mode if self.mode in (4, 8) else 1)
+            recovery, self.recovery_text = self.recovery_text, ''
+            mode = self.return_mode if self.mode in (4, 8) else 1
+            self.change(mode, recovery if mode == 2 else '')
+            if discard_voice and mode == 1:
+                self.voice_text, self.voice_target = '', None
             self.return_mode = 1
         elif command == 'new' and self.mode == 7 and self.project is not None:
             # Consume the physical action before invoking the desktop. A lost
@@ -677,6 +769,8 @@ class Review:
             elif self.mode == 1 and self.target:
                 ids = [s['id'] for s in self.project_sessions()]
                 self.target = ids[(ids.index(self.target) + (-1 if command == 'up' else 1)) % len(ids)]
+                if self.target != self.voice_target:
+                    self.voice_text, self.voice_target = '', None
                 self.last_targets[self.project] = self.target
                 self.selection.remember(self.project, self.target)
                 self.token = uuid.uuid4().hex
@@ -698,7 +792,7 @@ class Review:
                 self.last_targets[self.project] = self.target
                 self.selection.remember(self.project, self.target)
             self.change(1)
-        elif command == 'ok' and (self.mode == 2 or
+        elif command == 'ok' and ((self.mode == 1 and self.target) or self.mode == 2 or
                                   (self.mode == 3 and len(self.seen) == len(self.pages))):
             target, mode, pending, text = self.target, self.mode, self.pending, self.text
             if mode == 2 and self.new_project is not None:
@@ -715,13 +809,17 @@ class Review:
             if mode == 3:
                 return self.broker.resolve(pending, target, 'allow')
             try:
-                self.desktop.send(target, text)
-            except (OSError, EOFError, RuntimeError, ValueError, KeyError):
-                self.change(4, 'Send not confirmed.\nCheck chat on PC.\nDo not retry blindly.')
-        elif command == 'record' and self.mode in (1, 2) and (self.target or self.new_project is not None):
-            if self.target and self.broker.find(self.target):
-                return False
-            self.recording_text = self.text if self.mode == 2 else ''
+                sent = self.desktop.send_draft(target)
+                if sent:
+                    self.voice_text, self.voice_target = '', None
+                return sent
+            except (OSError, EOFError, RuntimeError, ValueError, KeyError, sqlite3.Error):
+                self.change(4, 'Send not confirmed.\nCheck PC input and chat.\nDo not retry blindly.')
+        elif command == 'record' and self.mode in (1, 2, 3) and (self.target or self.new_project is not None):
+            if self.mode == 3:
+                self.recording_review = (self.text, self.pending, self.page, set(self.seen), self.expires)
+            self.recording_text = (self.text if self.mode == 2 else
+                                   self.voice_text if self.voice_target == self.target else '')
             self.change(5, 'Recording...\nRelease OK to transcribe\nMaximum: 30 seconds')
         else:
             return False
@@ -730,30 +828,59 @@ class Review:
     def transcript(self, text):
         if self.mode != 5:
             return
-        previous, self.recording_text = self.recording_text, ''
+        previous = self.recording_text
         if text.strip():
-            voice = previous + text.strip()
+            segment = text.strip()
+            separator = ' ' if previous and previous[-1].isascii() and segment[0].isascii() else ''
+            voice = previous + separator + segment
             if len(voice) > 12000:
-                self.change(4, 'Voice text limit reached.\nHold UP to start again.')
+                self.recording_failed('Voice text limit reached.\nPress any key to dismiss.')
                 return
-            self.change(2, voice)
+            self.recording_text = ''
+            if self.new_project is not None:
+                self.change(2, voice)
+                return
             try:
-                if self.new_project is None:
-                    self.desktop.stage(self.target, voice)
+                self.desktop.stage(self.target, voice)
             except (OSError, EOFError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError):
-                pass  # The transcript remains available even if desktop filling fails.
+                self.recording_text = previous
+                self.recording_failed('PC input fill failed.\nNothing was sent.\nPress any key to dismiss.')
+                return
+            self.voice_text, self.voice_target = voice, self.target
+            if self.recording_review is not None:
+                self.restore_approval()
+            else:
+                self.change(1)
         elif previous:
-            self.change(2, previous)
+            self.recording_text = ''
+            if self.recording_review is not None:
+                self.restore_approval()
+            else:
+                self.change(2, previous) if self.new_project is not None else self.change(1)
         else:
-            self.change(4, 'No speech recognized.\nPress any key to dismiss.')
+            self.recording_failed('No speech recognized.\nPress any key to dismiss.')
+
+    def recording_failed(self, message):
+        """Keep PC input and the preceding bridge draft after a failed addition."""
+        self.recovery_text, self.recording_text = self.recording_text, ''
+        self.return_mode = 2 if self.new_project is not None and self.recovery_text else 1
+        self.change(4, message)
+
+    def restore_approval(self):
+        text, pending, page, seen, expires = self.recording_review
+        self.recording_review = None
+        self.change(3, text, pending)
+        self.page, self.seen, self.expires = page, seen, expires
 
     def screen(self):
         self.sync()
         selection = None
+        fixed_rows = None
         if self.mode == 7:
             if self.projects:
                 lines, selection = self.project_rows()
                 content = '\n'.join(lines)
+                fixed_rows = LIST_ENTRIES
             else:
                 content = self.error or 'No projects.\nOpen Codex on PC.'
         elif self.mode == 1:
@@ -763,10 +890,11 @@ class Review:
                     heading = '\n'.join(self.renderer.summary(project, 2))
                 except UnsupportedText:
                     heading = 'Project: view on PC'
-                content = heading + '\nNew chat\nHold OK to record.\nReview, then OK to send.'
+                content = heading + '\nNew chat\nHold OK to record.\nOK: send after recording.'
             elif self.target:
                 lines, selection = self.session_rows()
                 content = '\n'.join(lines)
+                fixed_rows = LIST_ENTRIES
             else:
                 project = next((p['name'] for p in self.projects if p['id'] == self.project), 'Project')
                 try:
@@ -776,7 +904,8 @@ class Review:
                 content = heading + '\nNo sessions yet.\nCreate a chat on PC.\nHold UP: Projects'
         else:
             content = self.pages[self.page] + f'\n[{self.page+1}/{len(self.pages)}]'
-        return bytes([self.mode]) + bytes.fromhex(self.token) + self.renderer.bitmap(content, selection=selection)
+        return bytes([self.mode]) + bytes.fromhex(self.token) + self.renderer.bitmap(
+            content, selection=selection, fixed_rows=fixed_rows)
 
     def session_list(self):
         return '\n'.join(self.session_rows()[0])
@@ -789,14 +918,10 @@ class Review:
         for i in range(start, min(start + LIST_ENTRIES, len(sessions))):
             session = sessions[i]
             selected = i == index
-            prefix = '' if selected else '  '
             try:
-                row = self.renderer.summary(prefix + session['title'], 2 if selected else 1)
-                # Projects come from Codex's named project record, never the prompt.
-                row.extend(self.renderer.summary(session.get('project', 'No project') +
-                           (' / ' + session['id'][-8:] if selected else ''), 1))
+                row = self.renderer.summary(session['title'], 1)
             except UnsupportedText:
-                row = [prefix + 'Title: view on PC', 'Unsupported project/title']
+                row = ['Title: view on PC']
             if selected:
                 selection = (len(lines), len(lines) + len(row))
             lines.extend(row)
@@ -809,12 +934,10 @@ class Review:
         for i in range(start, min(start + LIST_ENTRIES, len(self.projects))):
             project = self.projects[i]
             selected = i == index
-            count = sum(self.session_project(s) == project['id'] for s in self.sessions)
             try:
-                row = self.renderer.summary(('' if selected else '  ') + project['name'], 2 if selected else 1)
+                row = self.renderer.summary(project['name'], 1)
             except UnsupportedText:
                 row = ['Project: view on PC']
-            row.extend(self.renderer.summary(f'{count} sessions', 1))
             if selected:
                 selection = (len(lines), len(lines) + len(row))
             lines.extend(row)
@@ -887,6 +1010,7 @@ class InteractionServer:
         self.transcribe = Transcriber(model, chinese_script=chinese_script, backend=asr_backend)
         self.active = threading.Lock()
         self.target = None
+        self.review = None
         self.selection = SelectionMemory(self.desktop.root / 'codex-pet-selection.json'
                                          if hasattr(self.desktop, 'root') else None)
 
@@ -911,11 +1035,17 @@ class InteractionServer:
         if not self.active.acquire(False):
             sock.close(); return
         pcm = bytearray()
+        review = None
         try:
             sock.settimeout(4)
             wire = SecureChannel(sock, self.key, server=True)
             sock.settimeout(75)
-            review = Review(self.desktop, self.broker, self.renderer, self.selection)
+            review = getattr(self, 'review', None)
+            if review is None:
+                self.review = review = Review(self.desktop, self.broker, self.renderer, self.selection)
+            # Reconnection resumes the in-memory draft but invalidates every
+            # action token from the previous authenticated connection.
+            review.token = uuid.uuid4().hex
             while True:
                 data = wire.receive()
                 if data[0] == 2:
@@ -931,7 +1061,7 @@ class InteractionServer:
                     try:
                         review.transcript(self.transcribe(pcm))
                     except (OSError, ValueError, subprocess.SubprocessError):
-                        review.change(4, 'Transcription failed.\nNothing was sent.\nPress any key to dismiss.')
+                        review.recording_failed('Transcription failed.\nNothing was sent.\nPress any key to dismiss.')
                     pcm.clear()
                 elif command != 'sync':
                     review.action(command, value.get('token'))
@@ -952,6 +1082,8 @@ class InteractionServer:
             pass
         finally:
             pcm.clear()
+            if review is not None and review.mode == 5:
+                review.recording_failed('Recording interrupted.\nNothing was sent.\nPress any key to dismiss.')
             sock.close()
             self.target = None
             self.active.release()

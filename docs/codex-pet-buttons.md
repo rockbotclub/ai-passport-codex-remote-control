@@ -25,13 +25,13 @@ firmware before expecting that shortcut on a device. See the
 
 | Screen | Click UP | Click DOWN | Click OK | Hold UP | Hold DOWN | Hold OK |
 | --- | --- | --- | --- | --- | --- | --- |
-| Pet, interactive bridge connected | Open remembered session list or resume review | Same as UP | Same as UP | No action | Restart into Wi-Fi setup | No action |
+| Pet, interactive bridge connected | Open remembered session list or resume approval | Same as UP | Same as UP | No action | Restart into Wi-Fi setup | No action |
 | Project list | Previous project | Next project | Enter selected project's sessions | Prepare a new chat in the selected project | Return to pet immediately | No action |
 | New chat, before recording | No action | No action | No action | Cancel draft and return to projects | Return to pet; preserve draft | Record first voice message; release to transcribe |
-| Session list | Previous saved chat | Next saved chat | No action | Return to project list | Return to pet immediately | Record voice for selected chat; release to transcribe |
-| Voice preview | Previous text page | Next text page | Submit voice to selected chat or create the prepared new chat | Exit review, keep PC draft, return to preceding list | Exit review, keep PC draft, return to preceding list | Record additional voice; release to append; fill PC input for existing chats |
-| Approval | Next request page | Deny request and return to sessions | Allow after every page has been displayed | Deny request and return to sessions | Deny request and return to sessions | No action |
-| Error | Dismiss and return to preceding list or prepared new-chat draft | Same as UP | Same as UP | Dismiss and return to preceding list or prepared new-chat draft | Same as hold UP | No action |
+| Session list | Previous saved chat | Next saved chat | Send current PC input | Return to project list | Return to pet immediately | Record voice for selected chat; release to transcribe |
+| New-chat voice ready | No page change | No page change | Create the prepared chat and send its first message | Cancel draft and return to projects | Cancel draft and return to projects | Record additional voice; release to append in bridge memory |
+| Approval | Next request page | Deny request and return to sessions | Allow after every page has been displayed | Deny request and return to sessions | Deny request and return to sessions | Record and fill PC input; restore the same approval on release |
+| Error | Dismiss and restore preceding list, approval or prepared new-chat draft | Same as UP | Same as UP | Dismiss and restore preceding list, approval or prepared new-chat draft | Same as hold UP | No action |
 | New-chat notice | No action | No action | No action | Dismiss and return to preceding list | Dismiss and return to preceding list | No action |
 | Recording | Locked | Locked | Locked | Locked | Locked | Keep recording; release OK to finish |
 | Transcribing | Locked | Locked | Locked | Locked | Locked | Locked |
@@ -44,61 +44,52 @@ firmware before expecting that shortcut on a device. See the
   this local navigation does not cancel the PC chat or send a message.
 - From the pet, **click any function button** to reopen the remembered list.
   The opening click does not also move selection, start recording, send voice,
-  or approve a request. An unfinished voice preview or approval resumes instead.
-- Project/session navigation wraps at the first and last entries. Voice-preview
-  and approval pages also wrap.
+  or approve a request. An unfinished approval or new-chat draft resumes instead.
+- Project/session navigation wraps at the first and last entries. Approval
+  pages also wrap.
 - After **10 seconds without button activity**, interactive screens return to
   the pet even while Codex is working. Bridge heartbeats and status updates do
   not extend the timer. Recording/transcription remain visible until completion,
   then start a fresh 10-second window.
 - Returning by inactivity does not submit the PC draft or decide an approval.
-  Exiting voice review keeps the PC draft; deleting its text happens on the PC.
+  Exiting the session list keeps the PC draft; deleting its text happens on the PC.
   Use the approval screen's controls to deny a request explicitly.
 - After returning to the pet, release DOWN before holding it again for Wi-Fi
   setup. The return gesture itself does not enter setup.
 
 ## Voice, approval, and new-chat details
 
-- Voice requires a live interactive bridge and either a selected existing chat
-  or a prepared new-chat draft. The chat or new project remains pinned throughout
-  recording, transcription, and review. Empty session lists still cannot record;
-  return to projects and hold UP to prepare a new chat.
-- Recording starts after the OK hold is recognized; speak when `RECORDING`
-  appears. Release OK to finish. Capture is limited to 30 seconds. Releasing
-  transcribes and requests filling the selected chat's PC input with the device
-  transcript. A separate OK click sends that transcript to the selected chat.
-- If no speech is recognized or transcription fails, click any function button
-  to dismiss the error. The click only closes the error; it does not move the
-  selection or send anything. The selected chat or prepared new-chat draft
-  remains available, so a subsequent OK hold can record again. Holding UP or
-  DOWN also dismisses the error. Install the updated firmware for click recovery
-  and update the bridge for the matching speech-error instructions.
-- Holding OK on a voice preview adds another recording to the device transcript,
-  then fills the whole accumulated voice text on the PC. Existing PC input is
-  replaced, not merged. The device does not read PC input, follow PC edits,
-  detect PC sends/clears, or wait for prefill acknowledgement. Clicking OK sends
-  only the device's voice text, even if the PC input was edited or cleared.
-  Failed filling keeps the transcript available; no PC-input confirmation is
-  required. Exiting preview keeps the PC text and starts a fresh voice transcript
-  on the next recording. Device send may leave the PC input intact; manage it
-  on the computer. If submission is not confirmed, check the chat before retrying.
-- Approval UP advances to the next page; DOWN denies immediately. Clicking OK
-  cannot allow a request until all its pages have been displayed. Holding UP
-  or DOWN denies; it is not a neutral return-to-pet shortcut on this screen.
-- Holding UP on a saved local project prepares a device draft. Hold OK to record,
-  release to transcribe, then click OK to create the chat and send its first voice
-  message. New-chat transcripts stay on the device until confirmation; they do
-  not fill the PC composer. Holding OK in preview appends more voice. Cancel,
-  expiry, and repeated confirmation never create or resend a chat automatically.
-- The first turn runs through the local Codex CLI with its existing login and
-  CLI configuration, without permission or hook-trust bypass flags. After that
-  process exits, the bridge opens the saved chat on the desktop and selects it
-  when discovered. Existing-chat follow-ups use desktop IPC. While the first
-  CLI turn runs, the bridge cannot open or send another turn to that chat; do not
-  open it manually on the PC. Keep the bridge running, and stop it gracefully
-  with Ctrl+C to stop a pending first turn. An uncertain outcome requires a PC
-  check before retrying. `No project`, unavailable folders, and shared project
-  roots cannot use this shortcut.
+- Voice requires a live bridge and either a selected chat or prepared new-chat
+  draft. Recording and transcription pin the target. Speak when `RECORDING`
+  appears; release OK to transcribe. Recording is limited to 30 seconds.
+- For existing chats, transcription fills the PC input and returns to the session
+  list. No transcript text is displayed or saved on the card. Click OK to send
+  the current PC text, including computer edits. This also works without voice.
+  Empty or cleared input sends nothing; cached voice is never used as a fallback.
+- Consecutive recordings accumulate in bridge memory until sending or leaving
+  the selected chat. Filling replaces PC input with the accumulated voice and
+  waits briefly for acknowledgement. Waiting, pet return and reconnection retain
+  the bridge draft; restarting the bridge loses it. Failed transcription preserves
+  earlier voice and PC text; unacknowledged filling requires checking the PC input. No transcript is written to the selection file.
+- Click any function button to dismiss a speech/fill error. That click only
+  dismisses the error; it cannot send or decide an approval. The preceding list,
+  approval or new-chat draft remains available for another recording.
+- Approval UP advances a page; DOWN denies immediately. OK confirms after all
+  request pages have been displayed. Holding OK transcribes and fills PC input,
+  then restores that request without sending or deciding it. Holding UP or DOWN
+  denies the request.
+- Holding UP on a saved project prepares a new-chat draft. Record the first
+  message, then click OK on the generic ready notice to create and submit it.
+  Its text stays only in bridge memory until confirmation; the card never shows
+  the transcript. Another OK hold adds voice. Cancel/repeated events never create
+  or resend automatically. Project navigation and pet wake retain their normal
+  selection/open behavior.
+- The first new-chat turn uses the local Codex CLI with existing authentication
+  and configuration. After it exits, the bridge opens and selects that exact
+  chat. Existing-chat sends use the desktop owner IPC. While the first CLI turn
+  runs, do not take over that chat manually on the PC. A failed/uncertain send
+  requires a PC check before retrying. The PC input may remain after IPC sending;
+  clear it on the computer when appropriate.
 
 ## Wi-Fi and disconnected operation
 

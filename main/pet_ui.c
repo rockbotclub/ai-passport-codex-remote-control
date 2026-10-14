@@ -350,7 +350,7 @@ void pet_ui_control(const pet_control_view_t *view, bool visible) {
         lv_obj_align(s_panel, LV_ALIGN_TOP_MID, 0, pet_control_panel_top(view->mode));
         if (!expanded) lv_obj_add_flag(s_detail, LV_OBJ_FLAG_HIDDEN);
     }
-    const char *footers[] = {"", "Hold OK: voice; UP: Projects\nHold DOWN: Pet", "Hold OK: add; OK: send\nHold UP: back", "UP: page  OK: yes  DN: no", "Press a key: dismiss", "Release OK to finish", "Nothing sent yet", "OK: sessions; Hold UP: new\nHold DOWN: Pet", "Hold UP: Projects"};
+    const char *footers[] = {"", "OK: send; Hold OK: voice\nHold UP: Projects; DOWN: Pet", "OK: send; Hold OK: add voice\nHold UP: back", "OK: confirm; UP: page; DN: no\nHold OK: voice", "Press a key: dismiss", "Release OK to finish", "Nothing sent yet", "OK: sessions; Hold UP: new\nHold DOWN: Pet", "Hold UP: Projects"};
     lv_obj_set_style_text_font(s_footer, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_align(s_footer, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(s_footer, LV_ALIGN_TOP_MID, 0, PET_CONTROL_FOOTER_TOP);
