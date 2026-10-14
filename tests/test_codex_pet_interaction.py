@@ -1188,6 +1188,9 @@ class WhisperWorkerTests(unittest.TestCase):
         http.assert_called_once_with('127.0.0.1',1234,timeout=55)
 
 class DesktopReconnectTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch('interaction.time.sleep'))
+
     def write_draft(self, directory, text):
         import json
         state = {'electron-persisted-atom-state': {'composer-prompt-drafts-v2': {
@@ -1214,18 +1217,70 @@ class DesktopReconnectTests(unittest.TestCase):
                 self.assertEqual(parse_qs(route.query), {'prompt': ['voice & +\nnext']})
                 self.assertEqual(launch.call_args.kwargs['timeout'], 5)
 
-    def test_unacknowledged_fill_reports_error_without_stale_submission(self):
+    def test_delayed_fill_returns_to_list_and_later_sends_current_pc_edits(self):
         from interaction import Desktop as ActualDesktop
         with tempfile.TemporaryDirectory() as directory:
             desktop = ActualDesktop(directory)
             self.write_draft(directory, 'old PC text')
             with patch('interaction.sys.platform', 'darwin'), \
                     patch('interaction.subprocess.run') as launch, \
-                    patch('interaction.time.monotonic', side_effect=[0, 3]), \
-                    self.assertRaises(TimeoutError):
-                desktop.stage('one', 'new voice')
+                    patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
+                    patch.object(desktop, 'projects', return_value=Desktop().projects()):
+                review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
+                review.action('record', review.token)
+                with patch('interaction.time.monotonic', side_effect=[0, 3, 4]):
+                    review.transcript('new voice')
+                self.assertEqual((review.mode, review.text), (1, ''))
+                self.assertEqual(review.voice_text, 'new voice')
             launch.assert_called_once()
             self.assertEqual(desktop.draft('one'), 'old PC text')
+            self.assertIn('one', desktop._pending_fills)
+            self.write_draft(directory, 'edited voice on PC')
+            with patch.object(desktop, 'owner', return_value='owner'), patch.object(desktop, 'request') as request:
+                self.assertTrue(desktop.send_draft('one'))
+                self.assertEqual(request.call_args.args[1]['turnStart']['request']['input'][0]['text'],
+                                 'edited voice on PC')
+            self.assertNotIn('one', desktop._pending_fills)
+
+    def test_unacknowledged_fill_cannot_send_the_preceding_pc_input(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            self.write_draft(directory, 'old PC text')
+            with patch('interaction.sys.platform', 'darwin'), patch('interaction.subprocess.run'), \
+                    patch('interaction.time.monotonic', side_effect=[0, 3]):
+                self.assertFalse(desktop.stage('one', 'new voice'))
+            with patch.object(desktop, 'owner') as owner, patch.object(desktop, 'request') as request, \
+                    patch('interaction.time.monotonic', side_effect=[0, 3]), self.assertRaises(TimeoutError):
+                desktop.send_draft('one')
+            owner.assert_not_called(); request.assert_not_called()
+
+    def test_pending_fill_survives_a_missing_draft_without_resending_cached_voice(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            self.write_draft(directory, 'old PC text')
+            with patch('interaction.sys.platform', 'darwin'), patch('interaction.subprocess.run'), \
+                    patch('interaction.time.monotonic', side_effect=[0, 3]):
+                self.assertFalse(desktop.stage('one', 'new voice'))
+            self.write_draft(directory, '')
+            with patch('interaction.time.monotonic', side_effect=[0, 3]):
+                self.assertFalse(desktop.wait_for_fill('one'))
+            self.assertIn('one', desktop._pending_fills)
+            with patch.object(desktop, 'owner') as owner, patch.object(desktop, 'request') as request:
+                self.assertFalse(desktop.send_draft('one'))
+            owner.assert_not_called(); request.assert_not_called()
+
+    def test_confirm_waits_for_a_recent_pc_edit_before_reading_the_draft(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            self.write_draft(directory, 'before PC edit')
+            with patch('interaction.time.sleep', side_effect=lambda seconds: self.write_draft(directory, 'after PC edit')) as sleep, \
+                    patch.object(desktop, 'owner', return_value='owner'), patch.object(desktop, 'request') as request:
+                self.assertTrue(desktop.send_draft('one'))
+            sleep.assert_called_once_with(0.8)
+            self.assertEqual(request.call_args.args[1]['turnStart']['request']['input'][0]['text'], 'after PC edit')
 
     def test_filling_error_returns_dismissible_error_without_ipc_or_retry(self):
         from interaction import Desktop as ActualDesktop

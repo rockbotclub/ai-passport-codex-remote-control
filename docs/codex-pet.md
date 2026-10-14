@@ -7,6 +7,34 @@ screen using the original blue Codex pet. Normal operation is wireless: the
 computer and AI Passport join the same 2.4 GHz Wi-Fi network, and the device runs
 from its battery. USB is needed for initial flashing or optional wired status.
 
+## Delayed PC-input acknowledgement (2026-10-14)
+
+The user observed that PC text appeared while the card reported a fill failure.
+The bridge had treated a missing exact persisted draft within 2.5 seconds as a
+failed route. Delayed saving now leaves the fill pending and returns to the list;
+actual route-launch errors still show a dismissible error. Sending waits for
+recent PC edits and requires a pending fill to reach disk as the expected voice
+or changed PC text, preventing submission of the preceding input.
+
+The complete ESP-IDF 5.5.3 gate and independent archive verification passed.
+All 118 bridge tests passed without skips, including 86 interaction checks and
+18 focused desktop-adapter checks. The running bridge was updated with its
+existing settings; authentication and 30 encrypted syncs were observed without
+a traceback. Firmware source was unchanged and no image was flashed for this
+bridge correction. The device retains the deployed `df205d62...3dcb` archive
+identified in the following section.
+
+Build: PASS. Host tests: PASS. Device tests: NOT RUN for the corrected fill/send
+flow. Unverified: physical repeat recording, current PC-edit submission, and
+approval-time recording after this bridge update.
+
+Validation-only archive (not flashed):
+`build/firmware/159186e39f252d91dbd5719518e3f2d73b69909c527c8e345e7df3e9890d63d8/`.
+Merged-image SHA-256:
+`159186e39f252d91dbd5719518e3f2d73b69909c527c8e345e7df3e9890d63d8`.
+Matching ELF SHA-256:
+`922080bc020b805a0a6f8ab100c3c26909266ecb0d0b7457e9a83ea5c0bad243`.
+
 ## Confirm and PC-input sending (2026-10-14)
 
 Clicking Confirm in a selected session now sends that chat's current PC input,
@@ -615,8 +643,10 @@ visiting every request page.
 Consecutive recordings accumulate in bridge memory until sending or leaving
 the selected chat. Each fill replaces the PC input with the accumulated voice;
 it does not insert at the cursor or merge PC edits. The bridge waits up to 2.5
-seconds for the selected persisted PC draft to match before returning to the list.
-A failed fill shows a dismissible error and never sends automatically; check
+seconds for a saved acknowledgement. If saving is delayed, it returns to the
+list with the fill pending; an accepted desktop route is not reported as a fill
+failure just because the draft has not reached disk. A failed route launch
+shows a dismissible error and never sends automatically; check
 the actual PC input if filling was not acknowledged. Failed or interrupted
 transcription keeps the preceding voice and PC text. Waiting, automatic
 pet return and authenticated control reconnection preserve this bridge draft;
@@ -624,8 +654,12 @@ restarting the bridge loses it. No transcript or audio is written to the
 selection file. Prepared new chats keep their first voice message only in bridge
 memory and show a generic ready notice, without transcript text on the card.
 
-At each existing-chat confirmation, the bridge reads only the selected chat's
-persisted composer text and checks it again after finding the desktop owner.
+At each existing-chat confirmation, the bridge lets recent PC edits settle for
+0.8 seconds before reading only the selected chat's persisted composer text.
+An unacknowledged fill must reach disk as the expected voice or a changed PC
+text before sending; the previous PC text cannot be used while that fill is
+pending. Cleared input sends nothing. It checks the current text again after
+finding the desktop owner.
 If it changed during confirmation, nothing is sent. Plain strings and plain
 paragraph/text/hard-break documents are supported; attachments, mentions and
 formatted input require submission on the PC. IPC sending can leave the PC input

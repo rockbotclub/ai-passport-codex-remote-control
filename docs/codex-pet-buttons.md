@@ -68,7 +68,9 @@ firmware before expecting that shortcut on a device. See the
   Empty or cleared input sends nothing; cached voice is never used as a fallback.
 - Consecutive recordings accumulate in bridge memory until sending or leaving
   the selected chat. Filling replaces PC input with the accumulated voice and
-  waits briefly for acknowledgement. Waiting, pet return and reconnection retain
+  waits briefly for acknowledgement. Delayed persistence returns to the list with
+  the fill pending, without a false fill error; Confirm waits for the new PC text
+  instead of submitting the preceding input. Waiting, pet return and reconnection retain
   the bridge draft; restarting the bridge loses it. Failed transcription preserves
   earlier voice and PC text; unacknowledged filling requires checking the PC input. No transcript is written to the selection file.
 - Click any function button to dismiss a speech/fill error. That click only

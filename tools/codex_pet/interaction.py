@@ -102,6 +102,7 @@ class Desktop:
         self._lock = threading.Lock()
         self._projects = []
         self._projects_refreshed = 0
+        self._pending_fills = {}
         self.new_chats = NewChatRunner(self.open_created)
 
     def project_state(self):
@@ -339,6 +340,14 @@ class Desktop:
         """Submit the current PC text once, never fall back to cached voice."""
         if self.new_chats.owns(thread):
             raise RuntimeError('The first CLI turn is still running')
+        # Renderer draft updates debounce for 250 ms, then desktop persistence
+        # debounces for 500 ms. Let a just-finished PC edit reach disk first.
+        time.sleep(0.8)
+        text = self.draft(thread)
+        if not text.strip():
+            return False
+        if not self.wait_for_fill(thread):
+            raise TimeoutError('PC input is still settling; nothing was sent')
         text = self.draft(thread)
         if not text.strip():
             return False
@@ -351,24 +360,42 @@ class Desktop:
         self.request('thread-follower-start-turn', request, 2, owner)
         return True
 
+    def wait_for_fill(self, thread):
+        """A delayed save is pending, not proof that the desktop fill failed."""
+        pending = self._pending_fills.get(thread)
+        if pending is None:
+            return True
+        expected, previous = pending
+        deadline = time.monotonic() + 2.5
+        while True:
+            try:
+                current = self.draft(thread)
+                if current == expected or (current.strip() and previous is not None and current != previous):
+                    self._pending_fills.pop(thread, None)
+                    return True
+            except (OSError, ValueError, KeyError):
+                pass  # A transient or unsupported draft cannot acknowledge a fill.
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
     def stage(self, thread, text):
-        """Fill voice once and wait briefly for the selected PC draft to match."""
+        """Request filling once; keep a delayed acknowledgement pending."""
         if sys.platform != 'darwin':
             raise RuntimeError('Desktop composer integration currently requires macOS')
         if not text.strip() or len(text) > 12000:
             raise ValueError('Voice text empty or too long')
         if self.new_chats.owns(thread):
             raise RuntimeError('The first CLI turn is still running')
+        try:
+            previous = self.draft(thread)
+        except (OSError, ValueError, KeyError):
+            previous = None
         url = 'codex://threads/' + quote(thread, safe='') + '?' + urlencode({'prompt': text})
         subprocess.run(['open', '-b', 'com.openai.codex', url], check=True, timeout=5,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + 2.5
-        while True:
-            if self.draft(thread) == text:
-                return
-            if time.monotonic() >= deadline:
-                raise TimeoutError('PC input fill not acknowledged')
-            time.sleep(0.05)
+        self._pending_fills[thread] = (text, previous)
+        return self.wait_for_fill(thread)
 
 
 
