@@ -322,7 +322,13 @@ class Desktop:
                 for node in nodes:
                     if not isinstance(node, dict):
                         raise ValueError('Unsupported composer node')
-                    if node.get('type') == 'text' and isinstance(node.get('text'), str) and not node.get('marks'):
+                    # The desktop markdown editor attaches source positions to
+                    # ordinary text. These are metadata, not formatting/mentions.
+                    marks = node.get('marks', [])
+                    plain_marks = isinstance(marks, list) and all(
+                        isinstance(mark, dict) and mark.get('type') == 'startend'
+                        for mark in marks)
+                    if node.get('type') == 'text' and isinstance(node.get('text'), str) and plain_marks:
                         parts.append(node['text'])
                     elif node.get('type') == 'hardBreak':
                         parts.append('\n')

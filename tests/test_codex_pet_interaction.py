@@ -1350,6 +1350,41 @@ class DesktopReconnectTests(unittest.TestCase):
             self.write_draft(directory, prompt)
             with self.assertRaises(ValueError): desktop.draft('one')
 
+    def test_pc_source_position_marks_acknowledge_fill_and_send_current_text(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            def prompt(text):
+                return {'document': {'type': 'doc', 'attrs': {}, 'content': [
+                    {'type': 'paragraph', 'attrs': {'start': 0, 'end': 6}, 'content': [
+                        {'type': 'text', 'text': text, 'marks': [
+                            {'type': 'startend', 'attrs': {'start': 0, 'end': 6}}]}]}]},
+                        'plainTextMode': False}
+            desktop._pending_fills['one'] = ('voice input', '')
+            self.write_draft(directory, prompt('voice input'))
+            self.assertTrue(desktop.wait_for_fill('one'))
+            self.write_draft(directory, prompt('edited PC input'))
+            with patch.object(desktop, 'owner', return_value='owner'), \
+                    patch.object(desktop, 'request') as request:
+                self.assertTrue(desktop.send_draft('one'))
+            request.assert_called_once()
+            self.assertEqual(request.call_args.args[1]['turnStart']['request']['input'][0]['text'],
+                             'edited PC input')
+
+    def test_pc_source_positions_do_not_allow_formatting_or_malformed_marks(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            for marks in ([{'type': 'startend'}, {'type': 'bold'}],
+                          [{'type': 'link', 'attrs': {'href': 'https://example.com'}}],
+                          [None], ['startend'], {'type': 'startend'}, None):
+                with self.subTest(marks=marks), patch.object(desktop, 'request') as request:
+                    self.write_draft(directory, {'document': {'type': 'doc', 'content': [
+                        {'type': 'paragraph', 'content': [
+                            {'type': 'text', 'text': 'input', 'marks': marks}]}]}})
+                    with self.assertRaises(ValueError): desktop.send_draft('one')
+                    request.assert_not_called()
+
     def test_malformed_selected_draft_does_not_send_or_crash_control_handler(self):
         from interaction import Desktop as ActualDesktop
         malformed = (None, [], {'document': {'type': 'doc', 'content': None}},

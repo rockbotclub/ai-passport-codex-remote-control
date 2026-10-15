@@ -7,6 +7,28 @@ screen using the original blue Codex pet. Normal operation is wireless: the
 computer and AI Passport join the same 2.4 GHz Wi-Fi network, and the device runs
 from its battery. USB is needed for initial flashing or optional wired status.
 
+## Plain-text source-position marks (2026-10-15)
+
+A subsequent physical test failed before submission: the desktop editor stored
+ordinary text with `startend` source-position marks, which the bridge rejected
+as formatting. The parser now accepts these metadata marks while still rejecting
+formatting, mentions and malformed marks. Regression coverage checks pending-fill
+acknowledgement, sending the latest edited PC text and rejection of mixed marks.
+This is a PC bridge correction; no firmware flash is needed. After the running
+bridge update, sanitized diagnostics confirmed three saved transcription fills
+and one physical Confirm action with a successful desktop send acknowledgement.
+The resulting test message arrived in this chat. Submission after a PC edit and
+approval actions remain unverified; the earlier send acceptance below is historical.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and archive verification).
+Host tests: PASS (120 bridge checks, including 88 interaction tests).
+Device tests: PASS (transcription saving and physical Confirm sending).
+Unverified: PC-edit submission, approval confirmation and approval-time recording.
+The validation-only workspace archive was not flashed:
+`build/firmware/a7f060a12b6d2a9cef47befbd998bc96d3404d7a02adc7a92f25b5f328464ea7/`.
+Its matching ELF SHA-256 is
+`52fa91b4460a0813c87aca1ef75e8aa9000f866067696da8cd8865df30146b88`.
+
 ## Delayed PC-input acknowledgement (2026-10-14)
 
 The user observed that PC text appeared while the card reported a fill failure.
