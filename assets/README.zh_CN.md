@@ -15,6 +15,34 @@
 - 添加字库前评估 Flash 与内部 RAM 影响；ESP32-C3 无 PSRAM。
 - 不提交许可不允许分发的字库。
 
+Codex 宠物使用 `fonts/PassportSans-Regular.otf`，它是
+[Noto Sans CJK SC Regular](https://github.com/notofonts/noto-cjk/tree/main/Sans/OTF/SimplifiedChinese)
+的重命名字体子集，采用 [SIL OFL 1.1](fonts/OFL-NotoSansCJK.txt) 许可。原始下载 OTF 的
+SHA-256 为 `2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b`。
+子集保留上游版权元数据，并重命名为 Passport Sans。
+`fonts/passport-ui-glyphs.txt` 记录可打印 ASCII 和固件固定中文字库，使用 FontTools
+4.66.1 提取子集。生成的 `fonts/passport_font_12.c`、`passport_font_14.c` 和
+`passport_font_20.c` 兼容 LVGL 9.5，采用 2-bpp、无压缩格式存于 Flash，由 `main`
+编译，并由 `main/pet_ui.c` 中所有本地文字控件显式选用。
+每种字号包含 265 个字形。已验证的 MAP 记录字体只读数据合计 42,072 字节
+（分别为 9,537／11,866／20,669 字节），这些字体对象不占用 `.data` 或 `.bss`。
+
+使用 `lv_font_conv` 1.5.3 重新生成各字号（其他字号将两处 12 同时替换为 14 或 20）：
+
+```bash
+npx --yes lv_font_conv@1.5.3 --font assets/fonts/PassportSans-Regular.otf \
+  --symbols "$(cat assets/fonts/passport-ui-glyphs.txt)" --size 12 --bpp 2 \
+  --format lvgl --no-compress --no-kerning --lv-include lvgl.h \
+  --lv-font-name passport_font_12 \
+  -o assets/fonts/passport_font_12.c
+```
+
+新增字符时先扩充清单，必要时从上游字体重新提取 OTF 子集，再生成全部字号。
+该子集只供本地固定文字使用，任意项目名及审批内容由电脑绘制。
+`tools/codex_pet/ui_glyphs.py` 单独记录电脑端固定提示字形清单，本地化测试会将其与
+Python 源码核对；修改提示后使用 `python3 tools/codex_pet/update_ui_glyphs.py` 更新。
+字体无需扩大 LVGL 堆；运行时剩余堆内存及最大连续内存块仍需设备实测。
+
 ## 图片（images）
 
 可复用的源图与生成的显示资产放在 `images/`。
@@ -49,3 +77,8 @@
 Unicode 或通过 `--font` 明确指定的字体。生成前检查字符覆盖，占用 3,888 字节
 Flash，复用现有界面列表缓冲区。这份由字体生成的资源也被 Git 忽略；字体与
 宠物素材的再分发授权尚未确认。
+
+导入器还会生成 `images/codex-pet/syncing.inc`，包含“正在同步任务”和
+“正在读取电脑任务状态”。使用相同的已验证字体、16/12 像素字号、216 × 144 位图
+及现有列表缓冲区，增加 3,888 字节 Flash，使首个加密总览到达前也能显示同步提示。
+这份资源同样被 Git 忽略，适用相同的再分发限制。

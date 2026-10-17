@@ -5,7 +5,9 @@
 int main(void) {
     assert(PET_CONTROL_WIDTH % 8 == 0);
     assert(17 + PET_CONTROL_PIXELS + 16 <= 6144);
-    for (uint8_t mode = 1; mode <= 8; ++mode) {
+    const uint8_t modes[] = {1, 3, 4, 6, 7, 10};
+    for (unsigned i = 0; i < sizeof(modes); ++i) {
+        uint8_t mode = modes[i];
         unsigned top = pet_control_panel_top(mode);
         unsigned height = pet_control_panel_height(mode);
         assert(top > 33);

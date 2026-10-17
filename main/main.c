@@ -45,12 +45,12 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "Codex pet companion starting");
+    ESP_LOGI(TAG, "Codex 宠物伴侣正在启动");
     if (esp_sleep_get_wakeup_causes() & (1u << ESP_SLEEP_WAKEUP_GPIO))
         key_guard_arm(&s_key_guard, esp_timer_get_time(), 10LL * 1000 * 1000);
     esp_err_t i2c = bsp_i2c_init();
     if (bsp_display_init() != ESP_OK || !bsp_lvgl_init()) {
-        ESP_LOGE(TAG, "Display initialization failed");
+        ESP_LOGE(TAG, "显示屏初始化失败");
         return;
     }
     int brightness = 80;
@@ -60,9 +60,9 @@ void app_main(void) {
     if (!bsp_lvgl_lock(1000)) return;
     bool created = pet_ui_create();
     bsp_lvgl_unlock();
-    if (!created) { ESP_LOGE(TAG, "Pet UI allocation failed"); return; }
+    if (!created) { ESP_LOGE(TAG, "宠物界面内存分配失败"); return; }
     bool network_ok = pet_network_init() == ESP_OK;
-    if (!network_ok) ESP_LOGE(TAG, "Wi-Fi setup failed; USB remains available");
+    if (!network_ok) ESP_LOGE(TAG, "Wi-Fi 初始化失败；仍可使用 USB");
     bool setup = network_ok && pet_network_is_setup();
     bool control_ok = network_ok && !setup && pet_control_start();
     if (setup && bsp_lvgl_lock(1000)) {
@@ -80,12 +80,12 @@ void app_main(void) {
             key_guard_sync_released(&s_key_guard, released);
             portEXIT_CRITICAL(&s_key_lock);
             s_input_ready = true;
-        } else ESP_LOGW(TAG, "Buttons unavailable; USB pet remains active");
+        } else ESP_LOGW(TAG, "按键不可用；USB 宠物连接仍在运行");
     }
     int flags = fcntl(STDIN_FILENO, F_GETFL);
     bool usb_ok = flags >= 0 && fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK) >= 0;
-    if (!usb_ok) ESP_LOGW(TAG, "USB input unavailable; Wi-Fi remains active");
-    ESP_LOGI(TAG, "Free heap: %u; largest block: %u", (unsigned)esp_get_free_heap_size(),
+    if (!usb_ok) ESP_LOGW(TAG, "USB 输入不可用；Wi-Fi 连接仍在运行");
+    ESP_LOGI(TAG, "可用堆内存：%u；最大连续内存块：%u", (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     pet_parser_t parser = {0};
     pet_state_t state = {0};
@@ -138,7 +138,7 @@ void app_main(void) {
             pet_status_t visible = pet_visible_status(&state, now);
             char link[48], help[112];
             if (network_ok) pet_network_info(link, sizeof(link), help, sizeof(help));
-            else { snprintf(link, sizeof(link), "Wi-Fi / UNAVAILABLE"); snprintf(help, sizeof(help), "Restart to retry Wi-Fi"); }
+            else { snprintf(link, sizeof(link), "Wi-Fi / 不可用"); snprintf(help, sizeof(help), "请重启设备以重试 Wi-Fi 连接"); }
             pet_ui_network(link, help);
             pet_ui_update(visible, visible == PET_OFFLINE ? 0 : state.active,
                           visible == PET_OFFLINE ? 0 : state.waiting, battery);
@@ -152,7 +152,7 @@ void app_main(void) {
                 pet_navigation_update(&s_navigation, s_presented.mode, fresh, s_presented.opened, control_now);
                 pet_ui_control(&s_presented, s_navigation.visible && !s_navigation.opening);
                 if (!home_reported && s_presented.has_home && control_now >= 10000) {
-                    ESP_LOGI(TAG, "Overview received: %u running, %u waiting, %u rows; heap %u; largest %u",
+                    ESP_LOGI(TAG, "已接收任务总览：%u 个运行中，%u 个待处理，%u 行；堆内存 %u；最大连续块 %u",
                              s_presented.home.active - s_presented.home.waiting, s_presented.home.waiting,
                              s_presented.home.rows, (unsigned)esp_get_free_heap_size(),
                              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));

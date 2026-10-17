@@ -2,7 +2,7 @@
 #include <string.h>
 
 bool pet_home_decode(const uint8_t *frame, size_t length, pet_home_view_t *out) {
-    if (!frame || !out || length != PET_HOME_FRAME_BYTES || frame[0] != 9 || frame[1] > PET_ERROR)
+    if (!frame || !out || length != PET_HOME_FRAME_BYTES || frame[0] != 9 || frame[1] > PET_SYNCING)
         return false;
     unsigned active = (unsigned)frame[2] * 256 + frame[3];
     unsigned waiting = (unsigned)frame[4] * 256 + frame[5];
@@ -11,7 +11,7 @@ bool pet_home_decode(const uint8_t *frame, size_t length, pet_home_view_t *out) 
         mask >= (1u << rows) ||
         (frame[1] == PET_WORKING && (!active || waiting)) ||
         (frame[1] == PET_WAITING && !waiting) ||
-        ((frame[1] == PET_IDLE || frame[1] == PET_DONE || frame[1] == PET_OFFLINE) && active))
+        ((frame[1] == PET_IDLE || frame[1] == PET_DONE || frame[1] == PET_OFFLINE || frame[1] == PET_SYNCING) && active))
         return false;
     unsigned highlighted = 0;
     for (unsigned i = 0; i < rows; ++i) highlighted += (mask >> i) & 1u;

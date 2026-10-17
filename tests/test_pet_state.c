@@ -17,7 +17,7 @@ int main(void) {
     assert(pet_visible_status(&state, 5010) == PET_OFFLINE);
     assert(line(&parser, &state, "CP1 waiting 3 2\r\n", 20));
     assert(state.waiting == 2);
-    const char *invalid[] = {"CP1 working 0 0\n", "CP1 waiting 1 2\n", "CP1 idle 1 0\n", "CP1 done 0 1\n", "CP1 wait 2 1\n", "CP1 working -1 0\n", "CP1 working 1000 0\n", "CP1 working 1 0extra\n", "CP1 working 1 0 \n", "noise\n"};
+    const char *invalid[] = {"CP1 syncing 1 0\n","CP1 working 0 0\n", "CP1 waiting 1 2\n", "CP1 idle 1 0\n", "CP1 done 0 1\n", "CP1 wait 2 1\n", "CP1 working -1 0\n", "CP1 working 1000 0\n", "CP1 working 1 0extra\n", "CP1 working 1 0 \n", "noise\n"};
     for (unsigned i=0; i<sizeof(invalid)/sizeof(invalid[0]); ++i) {
         assert(!line(&parser, &state, invalid[i], 100));
         assert(state.received_ms == 20);
@@ -42,8 +42,13 @@ int main(void) {
     assert(idle.row != offline.row && idle.count > 1 && offline.count == 1);
     assert(offline.row == 5 && offline.first == 3);
     assert(idle.period_ms == 700);
+    assert(line(&parser, &state, "CP1 syncing 0 0\n", 6000));
+    assert(pet_visible_status(&state, 6001) == PET_SYNCING);
+    assert(pet_visible_status(&state, 11000) == PET_OFFLINE);
+    pet_animation_t syncing = pet_animation(PET_SYNCING);
+    assert(syncing.count > 1 && syncing.period_ms != idle.period_ms);
     const unsigned counts[] = {[0] = 6, [4] = 5, [5] = 8, [6] = 6, [7] = 6};
-    for (pet_status_t status = PET_OFFLINE; status <= PET_ERROR; ++status) {
+    for (pet_status_t status = PET_OFFLINE; status <= PET_SYNCING; ++status) {
         pet_animation_t animation = pet_animation(status);
         assert(animation.count && animation.period_ms);
         assert(animation.row < sizeof(counts) / sizeof(counts[0]));

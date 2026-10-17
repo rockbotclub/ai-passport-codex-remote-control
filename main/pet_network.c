@@ -41,9 +41,9 @@ static bool s_setup;
 static uint64_t s_last_sequence, s_retry_at, s_reboot_at;
 static portMUX_TYPE s_info_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_peer;
-static char s_link[48] = "Wi-Fi / STARTING";
+static char s_link[48] = "Wi-Fi / 启动中";
 static pet_setup_phase_t s_setup_state;
-static const char *s_setup_message = "Choose your Wi-Fi network.";
+static const char *s_setup_message = "请选择 Wi-Fi 网络。";
 static wifi_config_t s_candidate;
 static bool s_attempt_pending, s_scanning;
 static uint64_t s_connect_deadline, s_scan_deadline;
@@ -63,7 +63,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_events, CONNECTED);
         xEventGroupSetBits(s_events, RETRY);
-        if (!s_setup) link_set("Wi-Fi / RECONNECTING");
+        if (!s_setup) link_set("Wi-Fi / 重连中");
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
         xEventGroupSetBits(s_events, SCAN_DONE);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -77,10 +77,10 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 }
 
 static esp_err_t send_json(httpd_req_t *request, cJSON *json) {
-    if (!json) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Allocation failed");
+    if (!json) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "内存分配失败");
     char *text = cJSON_PrintUnformatted(json);
     cJSON_Delete(json);
-    if (!text) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "Allocation failed");
+    if (!text) return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "内存分配失败");
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     esp_err_t result = httpd_resp_sendstr(request, text);
@@ -115,7 +115,7 @@ static esp_err_t portal_redirect(httpd_req_t *request, httpd_err_code_t error) {
     httpd_resp_set_status(request, "302 Found");
     httpd_resp_set_hdr(request, "Location", PET_SETUP_URL);
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    return httpd_resp_sendstr(request, "Open " PET_SETUP_URL);
+    return httpd_resp_sendstr(request, "请打开 " PET_SETUP_URL);
 }
 
 static esp_err_t setup_status(httpd_req_t *request) {
@@ -164,11 +164,11 @@ static esp_err_t setup_networks(httpd_req_t *request) {
 static esp_err_t configure(httpd_req_t *request) {
     char body[512];
     if (request->content_len <= 0 || request->content_len >= sizeof(body))
-        return json_error(request, "400 Bad Request", "Invalid configuration size.");
+        return json_error(request, "400 Bad Request", "配网数据长度无效。");
     size_t used = 0;
     while (used < request->content_len) {
         int n = httpd_req_recv(request, body + used, request->content_len - used);
-        if (n <= 0) return json_error(request, "408 Request Timeout", "Retry configuration.");
+        if (n <= 0) return json_error(request, "408 Request Timeout", "请重试配网。");
         used += (size_t)n;
     }
     body[used] = 0;
@@ -180,7 +180,7 @@ static esp_err_t configure(httpd_req_t *request) {
                  (!password->valuestring[0] || strlen(password->valuestring) >= 8);
     if (!valid) {
         cJSON_Delete(json);
-        return json_error(request, "400 Bad Request", "SSID: 1-32 bytes; password: empty or 8-63 bytes.");
+        return json_error(request, "400 Bad Request", "网络名称需为 1–32 字节；密码为空或为 8–63 字节。");
     }
     wifi_config_t wifi = {0};
     memcpy(wifi.sta.ssid, ssid->valuestring, strlen(ssid->valuestring));
@@ -192,10 +192,10 @@ static esp_err_t configure(httpd_req_t *request) {
         s_candidate = wifi;
         s_attempt_pending = true;
         s_setup_state = PET_SETUP_CONNECTING;
-        s_setup_message = "Connecting. Keep the setup hotspot connected.";
+        s_setup_message = "正在连接，请保持设备热点连接。";
     }
     portEXIT_CRITICAL(&s_info_lock);
-    if (busy) return json_error(request, "409 Conflict", "A connection attempt is already in progress.");
+    if (busy) return json_error(request, "409 Conflict", "正在尝试连接，请稍候。");
     xEventGroupSetBits(s_events, CONFIGURE);
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
@@ -301,12 +301,12 @@ esp_err_t pet_network_init(void) {
             return result;
         }
         xEventGroupSetBits(s_events, SCAN);
-        link_set("Wi-Fi / SETUP");
+        link_set("Wi-Fi / 配网中");
     } else {
         result = esp_wifi_set_mode(WIFI_MODE_STA); if (result != ESP_OK) return result;
         result = esp_wifi_set_config(WIFI_IF_STA, &wifi); if (result != ESP_OK) return result;
         result = esp_wifi_start(); if (result != ESP_OK) return result;
-        link_set("Wi-Fi / CONNECTING");
+        link_set("Wi-Fi / 连接中");
         result = esp_wifi_connect(); if (result != ESP_OK) return result;
         s_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (s_socket < 0) return ESP_FAIL;
@@ -388,8 +388,8 @@ static void setup_poll(uint64_t now_ms) {
         portEXIT_CRITICAL(&s_info_lock);
         esp_err_t result = esp_wifi_set_config(WIFI_IF_STA, &candidate);
         if (result == ESP_OK) result = esp_wifi_connect();
-        if (result == ESP_OK) { s_connect_deadline = now_ms + 25000; link_set("Wi-Fi / CONNECTING"); }
-        else setup_finish(PET_SETUP_FAILED, "Cannot start connection. Please retry.");
+        if (result == ESP_OK) { s_connect_deadline = now_ms + 25000; link_set("Wi-Fi / 连接中"); }
+        else setup_finish(PET_SETUP_FAILED, "无法启动连接，请重试。");
         return;
     }
     if (s_connect_deadline) {
@@ -401,20 +401,20 @@ static void setup_poll(uint64_t now_ms) {
             if (result == ESP_OK) result = nvs_set_u8(s_nvs, "setup", 0);
             if (result == ESP_OK) result = nvs_commit(s_nvs);
             if (result == ESP_OK) {
-                setup_finish(PET_SETUP_SAVED, "Connected. Saved. Restarting.");
-                link_set("Wi-Fi / CONNECTED");
+                setup_finish(PET_SETUP_SAVED, "已连接并保存设置，正在重启。");
+                link_set("Wi-Fi / 已连接");
                 s_reboot_delay = 8000;
                 xEventGroupSetBits(s_events, REBOOT);
             } else {
                 (void)esp_wifi_disconnect();
-                setup_finish(PET_SETUP_FAILED, "Connected, but cannot save settings. Please retry.");
-                link_set("Wi-Fi / SAVE FAILED");
+                setup_finish(PET_SETUP_FAILED, "已连接，但无法保存设置，请重试。");
+                link_set("Wi-Fi / 保存失败");
             }
         } else if (decision == PET_SETUP_RETRY) {
             (void)esp_wifi_disconnect();
             xEventGroupClearBits(s_events, RETRY | CONNECTED);
-            setup_finish(PET_SETUP_FAILED, "Cannot connect. Check the password, 2.4 GHz network and signal, then retry.");
-            link_set("Wi-Fi / TRY AGAIN");
+            setup_finish(PET_SETUP_FAILED, "无法连接，请检查密码、2.4 GHz 网络和信号后重试。");
+            link_set("Wi-Fi / 请重试");
         }
         return;
     }
@@ -470,7 +470,7 @@ void pet_network_info(char *link, size_t link_size, char *help, size_t help_size
     snprintf(link, link_size, "%s", s_link);
     portEXIT_CRITICAL(&s_info_lock);
     if (s_setup) snprintf(help, help_size, "%s\n%s", s_ap_name, s_ap_password);
-    else snprintf(help, help_size, "Same Wi-Fi as your PC\nHold DOWN to configure");
+    else snprintf(help, help_size, "请连接与电脑相同的 Wi-Fi\n长按下键进入配网");
 }
 
 bool pet_network_is_setup(void) { return s_setup; }

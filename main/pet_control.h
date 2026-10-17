@@ -5,7 +5,7 @@
 #include "pet_home.h"
 #include "pet_control_layout.h"
 typedef struct {
-    uint8_t mode; // 0 offline; 1 Session; 2 new-chat ready; 3 approval; 4 error; 5 record; 6 transcribe; 7 projects; 8 notice
+    uint8_t mode; // 0 offline; 1 sessions; 3 approval; 4 error; 6 finishing (local); 7 projects; 10 PC dictation; 11 starting/12 sending (local)
     uint8_t token[16];
     uint8_t pixels[PET_CONTROL_PIXELS];
     uint64_t received_ms;

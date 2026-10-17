@@ -1,16 +1,16 @@
-"""Local desktop IPC adapter, physical approval broker and encrypted voice transport.
+"""Native desktop controls, physical approval broker and encrypted control transport.
 
-Existing-chat IPC never starts a second executor. New chats use one fresh CLI turn.
-Voice fills the selected PC composer without sending transcript text to the card.
-Only a physical Confirm with the current screen token can send the PC draft or approve.
+Confirm operates native Send plus Codex or opt-in Doubao PC dictation.
+No card microphone, bridge transcripts or CLI executor.
 """
 from contextlib import closing
+from messages import reason_text
+import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
 import socket
-import shutil
 import sqlite3
 import struct
 import subprocess
@@ -19,10 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
-import wave
-from urllib.parse import quote, urlencode
-from speech import WhisperWorker, finish_sentence
-from new_chat import NewChatRunner, cli_path
+from urllib.parse import quote
 
 CONTROL_PORT, APPROVAL_PORT = 19285, 19286
 WIDTH, HEIGHT = 216, 224
@@ -31,6 +28,48 @@ LIST_ENTRIES, LIST_LINE_HEIGHT = 5, 20
 PIXELS = WIDTH * HEIGHT // 8
 MAX_RECORD = 6144
 PROJECTLESS = '__projectless__'
+COMPOSER_DIAGNOSTIC_FIELDS = frozenset({
+    'webAreas', 'shellAreas', 'missingURLs', 'otherURLs', 'links', 'targetLinks',
+    'currentMarkers', 'numericCurrentMarkers', 'selectedLinks', 'treeLimit',
+    'roots', 'visited', 'roleReadErrors', 'childReadErrors', 'childAPIDisabled',
+    'childCannotComplete', 'listedWindows', 'mainWindow', 'focusedWindow', 'appChildren',
+    'windowAttributeAvailable', 'windowAPIDisabled', 'windowCannotComplete',
+    'appChildAttributeAvailable', 'appChildAPIDisabled', 'appChildCannotComplete',
+    'enableAccepted', 'enableUnsupported', 'enableAPIDisabled', 'enableCannotComplete',
+    'enableStatusAvailable', 'enabled',
+    'enhancedRequested', 'enhancedAccepted', 'enhancedUnsupported', 'enhancedAPIDisabled',
+    'enhancedCannotComplete', 'enhancedStatusAvailable', 'enhancedEnabled',
+})
+COMPOSER_TIMING_FIELDS = frozenset({'setup_ms', 'target_ms', 'controls_ms', 'press_ms', 'ready_ms'})
+COMPOSER_CONTROL_FIELDS = frozenset({'editors', 'buttons', 'candidates', 'scan_complete',
+    'submit_buttons', 'dictate_buttons', 'stop_buttons', 'resume_buttons', 'voice_buttons'})
+COMPOSER_DRAFT_FIELDS = frozenset({'draft_route_ok', 'draft_current_chat',
+    'draft_project_matches', 'draft_hero_matches', 'draft_project_conflicts', 'draft_scan_complete'})
+
+
+def report_composer_diagnostics(data):
+    """Accept only fixed numeric schemas from the native helper's stderr."""
+    if not isinstance(data, bytes):
+        return
+    for line in data.splitlines():
+        try:
+            values = json.loads(line)
+            if not isinstance(values, dict):
+                continue
+            if set(values) == COMPOSER_DIAGNOSTIC_FIELDS and all(
+                    type(value) in (int, bool) and 0 <= value <= 20000 for value in values.values()):
+                print('电脑端会话发现统计：', json.dumps(values, sort_keys=True), flush=True)
+            elif set(values) == COMPOSER_TIMING_FIELDS and all(
+                    type(value) is int and 0 <= value <= 60000 for value in values.values()):
+                print('电脑端原生操作耗时：', json.dumps(values, sort_keys=True), flush=True)
+            elif set(values) == COMPOSER_CONTROL_FIELDS and all(
+                    type(value) is int and 0 <= value <= 20000 for value in values.values()):
+                print('电脑端原生控件统计：', json.dumps(values, sort_keys=True), flush=True)
+            elif set(values) == COMPOSER_DRAFT_FIELDS and all(
+                    type(value) in (int, bool) and 0 <= value <= 20000 for value in values.values()):
+                print('电脑端新会话定位统计：', json.dumps(values, sort_keys=True), flush=True)
+        except (TypeError, ValueError, UnicodeError):
+            pass
 
 
 def exact(sock, n):
@@ -38,7 +77,7 @@ def exact(sock, n):
     while len(result) < n:
         part = sock.recv(n - len(result))
         if not part:
-            raise EOFError('Connection closed')
+            raise EOFError('连接已关闭')
         result.extend(part)
     return bytes(result)
 
@@ -51,20 +90,20 @@ class SecureChannel:
         if server:
             hello = exact(sock, 20)
             if hello[:4] != b'CPG1':
-                raise ValueError('Wrong protocol')
+                raise ValueError('通信协议不匹配')
             client = hello[4:]
             own = os.urandom(16)
             seed = client + own
             sock.sendall(own + hmac.digest(secret, b'server' + seed, 'sha256'))
             if not hmac.compare_digest(exact(sock, 32), hmac.digest(secret, b'client' + seed, 'sha256')):
-                raise ValueError('Pairing failed')
+                raise ValueError('配对失败')
         else:
             client = os.urandom(16)
             sock.sendall(b'CPG1' + client)
             response = exact(sock, 48)
             seed = client + response[:16]
             if not hmac.compare_digest(response[16:], hmac.digest(secret, b'server' + seed, 'sha256')):
-                raise ValueError('Pairing failed')
+                raise ValueError('配对失败')
             sock.sendall(hmac.digest(secret, b'client' + seed, 'sha256'))
         c2s = AESGCM(hmac.digest(secret, b'CPG1' + seed + b'C', 'sha256'))
         s2c = AESGCM(hmac.digest(secret, b'CPG1' + seed + b'S', 'sha256'))
@@ -73,7 +112,7 @@ class SecureChannel:
 
     def send(self, payload):
         if not 1 <= len(payload) <= MAX_RECORD - 16:
-            raise ValueError('Record too large')
+            raise ValueError('数据包过大')
         self.sent += 1
         nonce = b'\0' * 4 + self.sent.to_bytes(8, 'big')
         body = self.tx.encrypt(nonce, payload, b'CPG1')
@@ -83,27 +122,40 @@ class SecureChannel:
         from cryptography.exceptions import InvalidTag
         size = struct.unpack('!H', exact(self.sock, 2))[0]
         if not 17 <= size <= MAX_RECORD:
-            raise ValueError('Invalid record length')
+            raise ValueError('数据包长度无效')
         self.received += 1
         nonce = b'\0' * 4 + self.received.to_bytes(8, 'big')
         try:
             return self.rx.decrypt(nonce, exact(self.sock, size), b'CPG1')
         except InvalidTag:
-            raise ValueError('Record authentication failed') from None
+            raise ValueError('数据包认证失败') from None
+
+
+class ComposerActionError(RuntimeError):
+    """A selected composer action was unavailable or its outcome is unknown."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__('电脑端输入框操作失败：' + reason_text(reason))
 
 
 class Desktop:
-    """Use the existing desktop thread owner; never resume a second executor."""
-    def __init__(self, root=None):
+    """Read desktop status and operate the selected UI without a second executor."""
+    def __init__(self, root=None, dictation_backend='codex'):
+        if dictation_backend not in ('codex', 'doubao'):
+            raise ValueError('不支持此语音输入方式')
+        self.dictation_backend = dictation_backend
+        self._doubao = None
         self.root = Path(root or Path.home() / '.codex')
         self._sessions = []
         self._refreshing = False
         self._refreshed = 0
+        self._refresh_attempted = 0
         self._lock = threading.Lock()
         self._projects = []
         self._projects_refreshed = 0
-        self._pending_fills = {}
-        self.new_chats = NewChatRunner(self.open_created)
+        self._composer_helper_dir = None
+        self._new_composer = None
 
     def project_state(self):
         try:
@@ -111,7 +163,7 @@ class Desktop:
         except FileNotFoundError:
             return {}
         if not isinstance(state, dict):
-            raise ValueError('Unsupported desktop project state')
+            raise ValueError('无法识别电脑端项目状态')
         return state
 
     def project_id(self, identity, state):
@@ -124,11 +176,11 @@ class Desktop:
         if time.monotonic() - self._projects_refreshed >= 10:
             state = self.project_state()
             with closing(sqlite3.connect(f'file:{self.root / "state_5.sqlite"}?mode=ro', uri=True)) as db:
-                records = {identity: {'id': identity, 'name': name or 'Unnamed project'}
+                records = {identity: {'id': identity, 'name': name or '未命名项目'}
                            for identity, name in db.execute('SELECT id,name FROM projects ORDER BY name,id')}
             for identity, project in state.get('local-projects', {}).items():
                 identity = self.project_id(identity, state)
-                records[identity] = {'id': identity, 'name': project.get('name') or 'Unnamed project'}
+                records[identity] = {'id': identity, 'name': project.get('name') or '未命名项目'}
             self._projects = list(records.values())
             self._projects_refreshed = time.monotonic()
         return list(self._projects)
@@ -144,35 +196,7 @@ class Desktop:
             saved.extend(path for path in project.get('rootPaths', []) if path not in saved)
         return roots
 
-    def project_directory(self, project_id):
-        self._projects_refreshed = 0
-        if project_id == PROJECTLESS or not any(p['id'] == project_id for p in self.projects()):
-            raise ValueError('Select a saved project to create a chat')
-        state = self.project_state()
-        roots = self.project_roots(state)
-        paths = roots.get(project_id, [])
-        if not paths or not Path(paths[0]).is_absolute() or not Path(paths[0]).is_dir():
-            raise ValueError('Selected project has no accessible local folder')
-        directory = Path(paths[0]).resolve()
-        # CLI membership is resolved by cwd. Reject equal roots that name another
-        # project rather than silently misassigning the new chat.
-        for identity, paths in roots.items():
-            if identity != project_id and any(directory == Path(p).resolve() for p in paths):
-                raise ValueError('Selected project shares its folder with another project')
-        return directory
-
-    def new_session(self, project_id):
-        """Prepare device voice entry; this does not create a thread or send a prompt."""
-        self.project_directory(project_id)
-        cli_path()
-
-    def send_new(self, project_id, text):
-        return self.new_chats.start(cli_path(), self.project_directory(project_id), project_id, text)
-
-    def new_status(self, identity):
-        return self.new_chats.status(identity)
-
-    def open_created(self, thread):
+    def open_chat(self, thread):
         if sys.platform != 'darwin':
             return
         url = 'codex://threads/' + quote(thread, safe='')
@@ -181,41 +205,164 @@ class Desktop:
         with self._lock:
             self._refreshed = 0
 
-    def request(self, method, params, version, target=None, timeout=8):
+    def invalidate_sessions(self):
+        with self._lock:
+            self._refreshed = 0
+
+    def open_new_chat(self, project):
+        """Open Codex's native new-chat composer in the selected saved project."""
+        if sys.platform != 'darwin':
+            raise RuntimeError('电脑端新建会话需要 macOS')
+        if not project or project == PROJECTLESS:
+            raise ValueError('请先选择一个已保存的项目')
+        # Resolve by ID, never by display name or a guessed working directory.
+        self._projects_refreshed = 0
+        if project not in {item['id'] for item in self.projects()}:
+            raise ValueError('所选项目已不存在')
+        name = next(item['name'] for item in self.projects() if item['id'] == project)
+        if sum(item['name'] == name for item in self.projects()) != 1:
+            raise ValueError('项目重名，请先在电脑上区分项目名称')
+        baseline = {session['id'] for session in self._scan_sessions()}
+        # /threads/new with only projectId discards the project in the installed
+        # desktop parser. /new uses its native project-aware newThread handler.
+        url = 'codex://new?mode=codex&projectId=' + quote(project, safe='')
+        subprocess.run(['open', '-b', 'com.openai.codex', url], check=True, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._new_composer = {'id': '@new:' + uuid.uuid4().hex, 'title': '新会话',
+                              'project_id': project, 'project': name, 'baseline': baseline}
+        return dict(self._new_composer)
+
+    def _ipc_socket(self, timeout):
         path = self.root / 'ipc/ipc.sock'
         if path.stat().st_uid != os.getuid() or path.parent.stat().st_mode & 0o022:
-            raise RuntimeError('Unsafe desktop IPC ownership')
-        with socket.socket(socket.AF_UNIX) as sock:
+            raise RuntimeError('电脑端通信端点的所有者不匹配')
+        sock = socket.socket(socket.AF_UNIX)
+        try:
             sock.settimeout(timeout)
             sock.connect(str(path))
-            client = 'initializing-client'
-            def call(name, arguments, ver, owner=None):
-                identity = str(uuid.uuid4())
-                value = {'type': 'request', 'requestId': identity, 'sourceClientId': client,
-                         'version': ver, 'method': name, 'params': arguments}
-                if owner:
-                    value['targetClientId'] = owner
-                body = json.dumps(value).encode()
-                sock.sendall(struct.pack('<I', len(body)) + body)
-                for _ in range(200):
-                    n = struct.unpack('<I', exact(sock, 4))[0]
-                    if n > 8 * 1024 * 1024:
-                        raise ValueError('Desktop response too large')
-                    reply = json.loads(exact(sock, n))
-                    if reply.get('requestId') == identity:
-                        if reply.get('resultType') != 'success':
-                            raise RuntimeError(reply.get('error', 'Desktop rejected request'))
-                        return reply
-                raise RuntimeError('No desktop response')
-            client = call('initialize', {'clientType': 'ai-passport'}, 0)['result']['clientId']
-            return call(method, params, version, target)
+        except BaseException:
+            sock.close()
+            raise
+        return sock
 
-    def owner(self, thread):
-        return self.request('thread-owner-discovery', {'hostId': 'local', 'conversationId': thread}, 1, timeout=0.35)['handledByClientId']
+    @staticmethod
+    def _ipc_send(sock, value):
+        body = json.dumps(value).encode()
+        sock.sendall(struct.pack('<I', len(body)) + body)
+
+    @staticmethod
+    def _ipc_receive(sock, deadline):
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('等待电脑端响应超时')
+            sock.settimeout(remaining)
+            n = struct.unpack('<I', exact(sock, 4))[0]
+            if n > 32 * 1024 * 1024:
+                raise ValueError('电脑端响应数据过大')
+            reply = json.loads(exact(sock, n))
+            if not isinstance(reply, dict):
+                raise ValueError('无法识别电脑端消息')
+            if reply.get('type') != 'client-discovery-request':
+                return reply
+            # This observer owns no threads. Ignoring discovery would stall
+            # other desktop clients until the router's timeout expires.
+            Desktop._ipc_send(sock, {'type': 'client-discovery-response',
+                                    'requestId': reply['requestId'], 'response': {'canHandle': False}})
+
+    def _ipc_call(self, sock, client, name, arguments, version, deadline):
+        identity = str(uuid.uuid4())
+        value = {'type': 'request', 'requestId': identity, 'sourceClientId': client,
+                 'version': version, 'method': name, 'params': arguments}
+        self._ipc_send(sock, value)
+        for _ in range(200):
+            reply = self._ipc_receive(sock, deadline)
+            if reply.get('requestId') == identity:
+                if reply.get('resultType') != 'success':
+                    raise RuntimeError('电脑端拒绝了请求')
+                return reply
+        raise RuntimeError('电脑端未响应')
+
+    def activity_threads(self):
+        return [thread for thread, root in self.activity_index().items() if root is not None]
+
+    def activity_index(self):
+        # Source includes internal agents whose agent_path can be NULL.
+        from status_sync import thread_catalog
+        with closing(sqlite3.connect(f'file:{self.root / "state_5.sqlite"}?mode=ro', uri=True)) as db:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(threads)')}
+            source = 'source' if 'source' in columns else 'NULL'
+            return thread_catalog(db.execute(
+                f'SELECT id,archived,agent_path,{source} FROM threads ORDER BY updated_at DESC'))
+
+    def activity_snapshots(self, threads):
+        """Pipeline discovery so unloaded history cannot delay active tasks."""
+        from status_sync import compact_snapshot
+        with self._ipc_socket(12) as sock:
+            deadline = time.monotonic() + 12
+            client = self._ipc_call(sock, 'initializing-client', 'initialize',
+                                    {'clientType': 'ai-passport'}, 0, deadline)['result']['clientId']
+            pending, following = {}, {}
+            def follow(thread, owner, enabled):
+                self._ipc_send(sock, {'type': 'broadcast', 'sourceClientId': client, 'version': 1,
+                    'method': 'thread-stream-following-changed', 'targetClientIds': [owner],
+                    'params': {'hostId': 'local', 'conversationId': thread, 'following': enabled}})
+            try:
+                for thread in threads:
+                    request = str(uuid.uuid4())
+                    pending[request] = thread
+                    self._ipc_send(sock, {'type': 'request', 'requestId': request,
+                        'sourceClientId': client, 'version': 1, 'method': 'thread-owner-discovery',
+                        'params': {'hostId': 'local', 'conversationId': thread}})
+                while pending or following:
+                    reply = self._ipc_receive(sock, deadline)
+                    request = reply.get('requestId')
+                    if reply.get('type') == 'response' and request in pending:
+                        thread = pending.pop(request)
+                        if reply.get('resultType') == 'success':
+                            owner = reply['handledByClientId']
+                            following[thread] = owner
+                            follow(thread, owner, True)
+                        else:
+                            yield thread, None if reply.get('error') == 'no-client-found' else False
+                        continue
+                    params = reply.get('params', {})
+                    if not isinstance(params, dict):
+                        raise ValueError('无法识别电脑端状态快照参数')
+                    thread = params.get('conversationId')
+                    change = params.get('change', {})
+                    if not isinstance(change, dict):
+                        raise ValueError('无法识别电脑端状态快照变更')
+                    if (thread in following and reply.get('method') == 'thread-stream-state-changed'
+                            and reply.get('version') == 11 and reply.get('sourceClientId') == following[thread]
+                            and params.get('hostId') == 'local' and change.get('type') == 'snapshot'):
+                        owner = following.pop(thread)
+                        follow(thread, owner, False)
+                        try:
+                            result = compact_snapshot(change['conversationState'])
+                        except (KeyError, TypeError, ValueError):
+                            result = False
+                        yield thread, result
+            except (OSError, EOFError):
+                for thread in list(pending.values()) + list(following):
+                    yield thread, False
+            finally:
+                for thread, owner in following.items():
+                    try:
+                        follow(thread, owner, False)
+                    except OSError:
+                        break
+
+    def activity_snapshot(self, thread):
+        with closing(self.activity_snapshots([thread])) as results:
+            return next(results)[1]
 
     def _scan_sessions(self):
         # List saved chats independently of whether a desktop executor is loaded.
         # Owner discovery belongs to actions, never project membership/listing.
+        catalog = self.activity_index()
+        with self._lock:
+            saved_titles = {session['id']: session['title'] for session in self._sessions}
         with closing(sqlite3.connect(f'file:{self.root / "state_5.sqlite"}?mode=ro', uri=True)) as db:
             rows = db.execute('''SELECT t.id,t.name,p.name,t.cwd,t.project_id FROM threads t
                 LEFT JOIN projects p ON p.id=t.project_id
@@ -232,6 +379,8 @@ class Desktop:
         titles = state.get('thread-titles', {}).get('titles', {})
         result = []
         for identity, title, project, cwd, project_id in rows:
+            if catalog.get(identity) != identity:
+                continue
             try:
                 assignment = assignments.get(identity)
                 if assignment:
@@ -249,159 +398,147 @@ class Desktop:
                                if cwd and (cwd == root or cwd.startswith(root.rstrip('/') + '/'))]
                     _, project_id, project = max(matches, default=(0, None, None), key=lambda p: p[0])
                 # title/first_user_message are prompt-derived; name is the sidebar title.
-                result.append({'id': identity, 'title': title or titles.get(identity) or 'Untitled chat',
-                               'project': project or ('Unnamed project' if project_id else 'No project'),
+                result.append({'id': identity, 'title': title or titles.get(identity) or saved_titles.get(identity) or '未命名会话',
+                               'project': project or ('未命名项目' if project_id else '无项目'),
                                'project_id': self.project_id(project_id, state) if project_id else PROJECTLESS})
             except (OSError, EOFError, RuntimeError, ValueError, KeyError):
                 continue
         return result
 
-    def sessions(self):
+    def sessions(self, required=()):
         # Keep metadata refresh off the audio/control connection so buttons and
         # one-second snapshots remain responsive even with a large chat catalog.
         with self._lock:
-            if not self._refreshing and time.monotonic() - self._refreshed > 10:
+            known = {hashlib.sha256(session['id'].encode()).hexdigest()[:32] for session in self._sessions}
+            missing = any(identity not in known for identity in required if not identity.startswith('@'))
+            now = time.monotonic()
+            if (not self._refreshing and now - self._refresh_attempted >= 1
+                    and (missing or now - self._refreshed > 10)):
                 self._refreshing = True
+                self._refresh_attempted = now
                 def refresh():
-                    found = []
+                    found = None
                     try:
                         found = self._scan_sessions()
                     except (OSError, EOFError, RuntimeError, sqlite3.Error, ValueError, KeyError):
                         pass
                     finally:
                         with self._lock:
-                            self._sessions = found
+                            if found is not None:
+                                self._sessions = found
+                                self._refreshed = time.monotonic()
                             self._refreshing = False
-                            self._refreshed = time.monotonic()
                 threading.Thread(target=refresh, daemon=True).start()
-            return [s for s in self._sessions if not self.new_chats.owns(s['id'])]
+            return list(self._sessions)
 
-    def send(self, thread, text):
-        if self.new_chats.owns(thread):
-            raise RuntimeError('The first CLI turn is still running')
-        owner = self.owner(thread)
-        request = {'conversationId': thread, 'turnStart': {
-            'request': {'threadId': thread, 'input': [{'type': 'text', 'text': text, 'text_elements': []}]},
-            'context': {'inheritThreadSettings': True}}}
-        return self.request('thread-follower-start-turn', request, 2, owner)
-
-    def draft(self, thread):
-        """Read only the selected chat's persisted plain-text composer draft."""
-        state = self.project_state().get('electron-persisted-atom-state', {})
-        if not isinstance(state, dict):
-            raise ValueError('Unsupported composer state')
-        drafts = state.get('composer-prompt-drafts-v2', {})
-        if not isinstance(drafts, dict):
-            raise ValueError('Unsupported composer drafts')
-        value = drafts.get('local:' + thread)
-        if value is None:
-            return ''
-        if isinstance(value, dict) and 'draft' in value:
-            value = value['draft']
-        if isinstance(value, dict) and 'prompt' in value:
-            if any(v for k, v in value.items() if k not in ('prompt', 'pullRequestChecks')) or value.get('pullRequestChecks'):
-                raise ValueError('Submit attached or structured input on PC')
-            value = value['prompt']
-        if isinstance(value, str):
-            text = value
-        elif isinstance(value, dict) and isinstance(value.get('document'), dict):
-            document = value['document']
-            if document.get('type') != 'doc':
-                raise ValueError('Unsupported composer document')
-            content = document.get('content', [])
-            if not isinstance(content, list):
-                raise ValueError('Unsupported composer content')
-            paragraphs = []
-            for paragraph in content:
-                if not isinstance(paragraph, dict) or paragraph.get('type') != 'paragraph':
-                    raise ValueError('Submit formatted input on PC')
-                parts = []
-                nodes = paragraph.get('content', [])
-                if not isinstance(nodes, list):
-                    raise ValueError('Unsupported composer paragraph')
-                for node in nodes:
-                    if not isinstance(node, dict):
-                        raise ValueError('Unsupported composer node')
-                    # The desktop markdown editor attaches source positions to
-                    # ordinary text. These are metadata, not formatting/mentions.
-                    marks = node.get('marks', [])
-                    plain_marks = isinstance(marks, list) and all(
-                        isinstance(mark, dict) and mark.get('type') == 'startend'
-                        for mark in marks)
-                    if node.get('type') == 'text' and isinstance(node.get('text'), str) and plain_marks:
-                        parts.append(node['text'])
-                    elif node.get('type') == 'hardBreak':
-                        parts.append('\n')
-                    else:
-                        raise ValueError('Submit mentions or formatted input on PC')
-                paragraphs.append(''.join(parts))
-            text = '\n'.join(paragraphs)
-        else:
-            raise ValueError('Unsupported composer draft')
-        if len(text) > 12000:
-            raise ValueError('Composer text too long')
-        return text
-
-    def send_draft(self, thread):
-        """Submit the current PC text once, never fall back to cached voice."""
-        if self.new_chats.owns(thread):
-            raise RuntimeError('The first CLI turn is still running')
-        # Renderer draft updates debounce for 250 ms, then desktop persistence
-        # debounces for 500 ms. Let a just-finished PC edit reach disk first.
-        time.sleep(0.8)
-        text = self.draft(thread)
-        if not text.strip():
-            return False
-        if not self.wait_for_fill(thread):
-            raise TimeoutError('PC input is still settling; nothing was sent')
-        text = self.draft(thread)
-        if not text.strip():
-            return False
-        owner = self.owner(thread)
-        if self.draft(thread) != text:
-            raise ValueError('PC input changed during confirmation')
-        request = {'conversationId': thread, 'turnStart': {
-            'request': {'threadId': thread, 'input': [{'type': 'text', 'text': text, 'text_elements': []}]},
-            'context': {'inheritThreadSettings': True}}}
-        self.request('thread-follower-start-turn', request, 2, owner)
+    def send(self, thread):
+        """Press Send once; the live UI owns payload, validation and clearing."""
+        self.composer_action(thread, 'send')
         return True
 
-    def wait_for_fill(self, thread):
-        """A delayed save is pending, not proof that the desktop fill failed."""
-        pending = self._pending_fills.get(thread)
-        if pending is None:
-            return True
-        expected, previous = pending
-        deadline = time.monotonic() + 2.5
-        while True:
-            try:
-                current = self.draft(thread)
-                if current == expected or (current.strip() and previous is not None and current != previous):
-                    self._pending_fills.pop(thread, None)
-                    return True
-            except (OSError, ValueError, KeyError):
-                pass  # A transient or unsupported draft cannot acknowledge a fill.
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(0.05)
-
-    def stage(self, thread, text):
-        """Request filling once; keep a delayed acknowledgement pending."""
+    def prepare_composer(self):
+        """Compile native controls without opening or interacting with an app."""
         if sys.platform != 'darwin':
-            raise RuntimeError('Desktop composer integration currently requires macOS')
-        if not text.strip() or len(text) > 12000:
-            raise ValueError('Voice text empty or too long')
-        if self.new_chats.owns(thread):
-            raise RuntimeError('The first CLI turn is still running')
+            raise RuntimeError('原生输入框控制需要 macOS')
+        if self._composer_helper_dir is None:
+            directory = tempfile.TemporaryDirectory(prefix='passport-composer-')
+            subprocess.run(['/usr/bin/clang', '-fobjc-arc', '-framework', 'AppKit',
+                            '-framework', 'ApplicationServices',
+                            str(Path(__file__).with_name('composer_action.m')),
+                            '-o', str(Path(directory.name) / 'composer-action')],
+                           check=True, timeout=20, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._composer_helper_dir = directory
+        if self.dictation_backend == 'doubao' and self._doubao is None:
+            from doubao_dictation import DoubaoDictation
+            self._doubao = DoubaoDictation(self._composer_helper_dir.name)
+            self._doubao.prepare()
+
+    def _composer_title(self, thread):
+        """Read only chat names; control startup needs no project/path resolution."""
+        with closing(sqlite3.connect(f'file:{self.root / "state_5.sqlite"}?mode=ro', uri=True)) as db:
+            rows = db.execute('SELECT id,name FROM threads WHERE archived=0 AND agent_path IS NULL').fetchall()
+        fallback = (self.project_state().get('thread-titles', {}).get('titles', {})
+                    if any(not name for _, name in rows) else {})
+        titles = {identity: name or fallback.get(identity) or '未命名会话' for identity, name in rows}
+        title = titles.get(thread)
+        return title if title and sum(value == title for value in titles.values()) == 1 else None
+
+    def composer_action(self, thread, action):
+        """Target one UI action; never read prompts or submit text via IPC."""
+        if action not in ('send', 'dictate-start', 'dictate-stop', 'dictate-cancel'):
+            raise ValueError('不支持此输入框操作')
+        if sys.platform != 'darwin':
+            raise RuntimeError('电脑端输入框不可用')
+        started = time.monotonic()
+        self.prepare_composer()
+        draft = self._new_composer if self._new_composer and self._new_composer['id'] == thread else None
+        if thread.startswith('@new:') and draft is None:
+            raise ComposerActionError('chat-changed')
+        if action in ('send', 'dictate-start') and not draft:
+            self.open_chat(thread)
+        navigated = time.monotonic()
+        request = {'thread': thread, 'action': action}
+        if draft:
+            request['draftProject'] = draft['project']
+        # New sidebar rows expose an accessible title/current marker, not href.
+        # Supply a fresh title only when it uniquely identifies this saved chat.
         try:
-            previous = self.draft(thread)
-        except (OSError, ValueError, KeyError):
-            previous = None
-        url = 'codex://threads/' + quote(thread, safe='') + '?' + urlencode({'prompt': text})
-        subprocess.run(['open', '-b', 'com.openai.codex', url], check=True, timeout=5,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self._pending_fills[thread] = (text, previous)
-        return self.wait_for_fill(thread)
+            title = self._composer_title(thread) if not draft else None
+            if title:
+                request['title'] = title
+        except (OSError, EOFError, RuntimeError, sqlite3.Error, ValueError, KeyError):
+            pass  # URL-bound views still work; never guess a title on failure.
+        catalogued = time.monotonic()
+        try:
+            if self.dictation_backend == 'doubao' and action != 'send':
+                from doubao_dictation import DoubaoError
+                try:
+                    if action == 'dictate-start':
+                        if draft:
+                            self._doubao.start(thread, draft_project=draft['project'])
+                        else:
+                            self._doubao.start(thread, request.get('title'))
+                    else:
+                        report_composer_diagnostics(self._doubao.finish(thread, cancel=action == 'dictate-cancel'))
+                except DoubaoError as error:
+                    report_composer_diagnostics(error.diagnostics)
+                    print('电脑端输入框操作结果：', reason_text(error.reason), flush=True)
+                    raise ComposerActionError(error.reason) from error
+                return
+            completed = subprocess.run([str(Path(self._composer_helper_dir.name) / 'composer-action')],
+                                       input=json.dumps(request).encode(),
+                                       check=True, timeout=8, stdout=(subprocess.PIPE if action == 'dictate-start'
+                                                                   else subprocess.DEVNULL), stderr=subprocess.PIPE)
+            report_composer_diagnostics(completed.stderr)
+        except subprocess.TimeoutExpired as error:
+            report_composer_diagnostics(error.stderr)
+            if action == 'dictate-start' and error.stdout == b'pressed\n':
+                raise ComposerActionError('dictation-start-not-ready') from error
+            raise
+        except subprocess.CalledProcessError as error:
+            # Helper diagnostics are numeric discovery counts only. Never log
+            # arbitrary stderr, app labels, URLs, chat identities or input text.
+            report_composer_diagnostics(error.stderr)
+            if action == 'dictate-start' and error.stdout == b'pressed\n':
+                raise ComposerActionError('dictation-start-not-ready') from error
+            reasons = {10: 'accessibility-denied', 11: 'app-unavailable', 12: 'windows-unavailable',
+                       13: 'chat-not-found', 14: 'multiple-chat-views', 15: 'writable-editor-not-found',
+                       16: 'multiple-writable-editors', 18: 'press-unsupported',
+                       19: 'press-not-acknowledged', 20: 'accessibility-tree-limit',
+                       21: 'invalid-composer-request', 22: 'composer-button-unavailable',
+                       23: 'multiple-composer-buttons', 24: 'chat-changed',
+                       25: 'dictation-already-active', 26: 'dictation-start-not-ready',
+                       27: 'accessibility-view-unavailable', 28: 'send-disabled',
+                       29: 'send-input-required'}
+            reason = reasons.get(error.returncode, 'helper-failed')
+            print('电脑端输入框操作结果：', reason_text(reason), flush=True)
+            raise ComposerActionError(reason) from error
+        finally:
+            print('电脑端输入框操作耗时：', {'send': '发送', 'dictate-start': '启动语音输入', 'dictate-stop': '结束语音输入', 'dictate-cancel': '取消语音输入'}[action],
+                  '导航毫秒：', round((navigated - started) * 1000),
+                  '目录查询毫秒：', round((catalogued - navigated) * 1000),
+                  '原生操作毫秒：', round((time.monotonic() - catalogued) * 1000), flush=True)
+
 
 
 
@@ -414,7 +551,7 @@ class Broker:
         identity = uuid.uuid4().hex
         with self.lock:
             self.pending[identity] = {'id': identity, 'thread': value['session_id'],
-                'text': value.get('tool_name', 'Tool') + '\n' + json.dumps(value.get('tool_input', {}), ensure_ascii=False, indent=2),
+                'text': value.get('tool_name', '工具') + '\n' + json.dumps(value.get('tool_input', {}), ensure_ascii=False, indent=2),
                 'expires': time.monotonic() + 115, 'answer': None, 'event': threading.Event()}
             return self.pending[identity]
 
@@ -519,12 +656,15 @@ class Renderer:
         self.font = ImageFont.truetype(source, 16)
         with TTFont(source, fontNumber=0) as asset:
             self.coverage = set(asset.getBestCmap())
+        from ui_glyphs import REQUIRED_GLYPHS
+        if not REQUIRED_GLYPHS <= self.coverage:
+            raise ValueError('字体缺少中文提示所需字符，请使用 --font 指定完整的中文字体。')
         self.cache = {}
 
     def pages(self, text):
         for char in text:
             if char != '\n' and ord(char) not in self.coverage:
-                raise UnsupportedText(f'Unsupported U+{ord(char):04X}.\nReview on PC.\nHold DOWN to dismiss.')
+                raise UnsupportedText(f'不支持字符 U+{ord(char):04X}\n请在电脑上查看\n按任意键关闭提示')
         lines, line = [], ''
         for char in text:
             if char == '\n':
@@ -551,18 +691,18 @@ class Renderer:
             lines = text.split('\n')
             first, end = selection
             if fixed_rows is not None and not 1 <= fixed_rows <= HEIGHT:
-                raise ValueError('Invalid fixed row count')
+                raise ValueError('固定行数无效')
             row_height = HEIGHT // fixed_rows if fixed_rows else LIST_LINE_HEIGHT
             top = (HEIGHT - fixed_rows * row_height) // 2 if fixed_rows else 0
             limit = fixed_rows or HEIGHT // row_height
             if not 0 <= first < end <= len(lines) <= limit:
-                raise ValueError('Invalid selected chat layout')
+                raise ValueError('所选会话的布局无效')
             draw.rounded_rectangle((0, top + first * row_height, WIDTH - 1,
                                     top + end * row_height - 1), radius=5, fill=1)
             for index, line in enumerate(lines):
                 bounds = draw.textbbox((0, 0), line, font=self.font, anchor='lt')
                 if bounds[2] > WIDTH - 8 or bounds[3] > row_height:
-                    raise ValueError('Selected chat text exceeds panel')
+                    raise ValueError('所选会话文字超出显示区域')
                 draw.text((4, top + index * row_height + (row_height - bounds[3]) // 2), line,
                           font=self.font, anchor='lt', fill=0 if first <= index < end else 1)
         result = image.tobytes()
@@ -601,7 +741,7 @@ class SelectionMemory:
                 pass
 
     def remember(self, project, target):
-        if not project or not target or (project, target) == (self.project, self.target):
+        if not project or not target or target.startswith('@new:') or (project, target) == (self.project, self.target):
             return
         self.project, self.target = project, target
         if self.path:
@@ -620,6 +760,8 @@ class SelectionMemory:
 
 class Review:
     def __init__(self, desktop, broker, renderer, selection=None):
+        self.dictation_thread = None
+        self.pc_dictation_capable = False
         self.desktop, self.broker, self.renderer = desktop, broker, renderer
         self.selection = selection if selection is not None else SelectionMemory()
         self.sessions = []
@@ -639,13 +781,8 @@ class Review:
         self.error = ''
         self.expires = 0
         self.refresh_at = 0
-        self.recording_text = ''
-        self.recovery_text = ''
-        self.voice_text = ''
-        self.voice_target = None
-        self.recording_review = None
-        self.new_project = None
-        self.new_job = None
+        self.dictation_review = None
+        self.draft = None
 
     @staticmethod
     def session_project(session):
@@ -657,16 +794,32 @@ class Review:
     def refresh_lists(self):
         previous = (self.sessions, self.projects, self.project, self.target)
         try:
+            if self.draft and self.draft['submitted']:
+                self.desktop.invalidate_sessions()
             sessions = self.desktop.sessions()
             projects = {p['id']: dict(p) for p in self.desktop.projects()}
+            if self.draft and self.draft['project_id'] in projects:
+                created = [s for s in sessions if self.session_project(s) == self.draft['project_id']
+                           and s['id'] not in self.draft['baseline']]
+                if self.draft['submitted'] and created:
+                    if self.target == self.draft['id']:
+                        self.target = created[0]['id'] if len(created) == 1 else None
+                        if self.target:
+                            self.last_targets[self.draft['project_id']] = self.target
+                            self.selection.remember(self.draft['project_id'], self.target)
+                        else:
+                            self.change(4, '发现多个新会话\n请返回后选择会话')
+                    self.draft = None
+                else:
+                    sessions = [dict(self.draft)] + sessions
             for session in sessions:
                 identity = self.session_project(session)
-                projects.setdefault(identity, {'id': identity, 'name': session.get('project', 'No project')})
+                projects.setdefault(identity, {'id': identity, 'name': session.get('project', '无项目')})
             self.sessions, self.projects = sessions, list(projects.values())
             self.error = ''
         except (OSError, EOFError, RuntimeError, sqlite3.Error, ValueError, KeyError):
             self.sessions, self.projects = [], []
-            self.error = 'Desktop unavailable'
+            self.error = '电脑端暂不可用'
         ids = [p['id'] for p in self.projects]
         if self.project not in ids:
             self.project = ids[0] if ids else None
@@ -686,7 +839,7 @@ class Review:
         self.mode, self.text, self.pending = mode, text, pending
         self.token = uuid.uuid4().hex
         try:
-            self.pages = self.renderer.pages('Voice ready.\nOK: send first message\nHold OK: add voice' if mode == 2 else text)
+            self.pages = self.renderer.pages(text)
         except UnsupportedText as error:
             self.mode, self.text = 4, ''
             self.pages = self.renderer.pages(str(error))
@@ -696,28 +849,9 @@ class Review:
 
     def sync(self):
         now = time.monotonic()
-        # Only approvals expire. Waiting does not discard bridge voice drafts.
+        # Only approvals expire; dictation is bounded by the control connection.
         if self.mode == 3 and (now >= self.expires or not self.broker.find(self.target)):
             self.change(1)
-        if self.new_project is not None:
-            return  # Pin the new-chat draft; never fall back to an existing session.
-        if self.mode == 8 and self.new_job:
-            job = self.desktop.new_status(self.new_job)
-            if job and job['status'] in ('complete', 'failed'):
-                if job['status'] == 'failed':
-                    self.new_job = None
-                    self.change(4, 'New chat not confirmed.\nCheck chat on PC.\nDo not retry blindly.')
-                    return
-                self.refresh_lists()
-                if any(s['id'] == job['thread'] for s in self.project_sessions()):
-                    self.target, self.new_job = job['thread'], None
-                    self.last_targets[self.project] = self.target
-                    self.selection.remember(self.project, self.target)
-                    self.return_mode = 1
-                    self.change(1)
-                else:
-                    self.target = None
-            return
         if self.mode not in (1, 7):
             return
         if now >= self.refresh_at:
@@ -730,17 +864,13 @@ class Review:
     def action(self, command, token):
         self.sync()
         if command == 'sessions':
-            # Wake is navigation only: a refreshed list token must not prevent
-            # opening it. New-chat/approval screens resume without confirmation.
-            if self.mode == 5:
+            if self.mode == 10:
                 return False
-            if self.new_project is not None:
-                self.token = uuid.uuid4().hex
-                return True
             if self.mode in (1, 7):
                 ids = [p['id'] for p in self.projects]
-                if self.selection.project in ids:
-                    self.project = self.selection.project
+                preferred = self.draft['project_id'] if self.draft else self.selection.project
+                if preferred in ids:
+                    self.project = preferred
                 sessions = [s['id'] for s in self.project_sessions()]
                 remembered = self.last_targets.get(self.project)
                 self.target = remembered if remembered in sessions else (sessions[0] if sessions else None)
@@ -751,9 +881,7 @@ class Review:
             else:
                 self.token = uuid.uuid4().hex
             return True
-        if token != self.token:
-            return False
-        if self.mode == 5:
+        if token != self.token or self.mode == 10:
             return False
         if command == 'back' and self.mode == 7:
             return False
@@ -761,39 +889,29 @@ class Review:
             if self.target:
                 self.last_targets[self.project] = self.target
             self.target = None
-            self.new_project = None
-            self.voice_text, self.voice_target = '', None
             self.change(7)
         elif command in ('cancel', 'back'):
-            if self.mode == 4 and self.recording_review is not None:
+            if self.mode == 4 and self.dictation_review is not None:
                 self.restore_approval()
                 return True
             if self.pending:
                 self.broker.resolve(self.pending, self.target, 'deny')
-            discard_voice = self.mode != 4
-            self.new_job = None
-            recovery, self.recovery_text = self.recovery_text, ''
-            mode = self.return_mode if self.mode in (4, 8) else 1
-            self.change(mode, recovery if mode == 2 else '')
-            if discard_voice and mode == 1:
-                self.voice_text, self.voice_target = '', None
+            self.change(self.return_mode if self.mode == 4 else 1)
             self.return_mode = 1
         elif command == 'new' and self.mode == 7 and self.project is not None:
-            # Consume the physical action before invoking the desktop. A lost
-            # acknowledgement must not prepare another draft automatically.
             self.return_mode = 7
-            if self.project == PROJECTLESS:
-                self.change(4, 'No saved project.\nCreate a standalone chat\non PC. Hold UP: Projects')
-                return False
-            self.change(8, 'Preparing new chat.')
+            # Consume the token before native navigation; a timeout is never retried.
+            self.change(1)
             try:
-                self.desktop.new_session(self.project)
-                self.target = None
-                self.new_project = self.project
+                baseline = {s['id'] for s in self.sessions}
+                draft = self.desktop.open_new_chat(self.project)
+                self.draft = {**draft, 'baseline': draft.get('baseline', baseline), 'submitted': False}
+                self.target = draft['id']
+                self.last_targets[self.project] = self.target
                 self.return_mode = 1
-                self.change(1)
-            except (OSError, RuntimeError, ValueError, sqlite3.Error, subprocess.SubprocessError):
-                self.change(4, 'New chat unavailable.\nCheck local project\nand Codex CLI on PC.\nHold UP: Projects')
+                self.refresh_lists()
+            except (OSError, RuntimeError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError):
+                self.change(4, '暂时无法新建会话\n请在电脑上检查 Codex\n和所选项目名称')
         elif command in ('up', 'down'):
             if self.mode == 7 and self.projects:
                 ids = [p['id'] for p in self.projects]
@@ -802,17 +920,15 @@ class Review:
             elif self.mode == 1 and self.target:
                 ids = [s['id'] for s in self.project_sessions()]
                 self.target = ids[(ids.index(self.target) + (-1 if command == 'up' else 1)) % len(ids)]
-                if self.target != self.voice_target:
-                    self.voice_text, self.voice_target = '', None
                 self.last_targets[self.project] = self.target
                 self.selection.remember(self.project, self.target)
                 self.token = uuid.uuid4().hex
-            elif self.mode in (2, 3):
-                if self.mode == 3 and command == 'down':
+            elif self.mode == 3:
+                if command == 'down':
                     self.broker.resolve(self.pending, self.target, 'deny')
                     self.change(1)
                 else:
-                    self.page = (self.page + (-1 if command == 'up' and self.mode == 2 else 1)) % len(self.pages)
+                    self.page = (self.page + 1) % len(self.pages)
                     self.seen.add(self.page)
                     self.token = uuid.uuid4().hex
             else:
@@ -825,83 +941,129 @@ class Review:
                 self.last_targets[self.project] = self.target
                 self.selection.remember(self.project, self.target)
             self.change(1)
-        elif command == 'ok' and ((self.mode == 1 and self.target) or self.mode == 2 or
+        elif command == 'ok' and ((self.mode == 1 and self.target) or
                                   (self.mode == 3 and len(self.seen) == len(self.pages))):
-            target, mode, pending, text = self.target, self.mode, self.pending, self.text
-            if mode == 2 and self.new_project is not None:
-                project, self.new_project = self.new_project, None
-                self.return_mode = 7
-                self.change(8, 'New chat submitted.\nWaiting for first reply.\nHold UP: Projects')
-                try:
-                    self.new_job = self.desktop.send_new(project, text)
-                except (OSError, EOFError, RuntimeError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError):
-                    self.change(4, 'New chat not confirmed.\nCheck chat on PC.\nDo not retry blindly.')
-                return True
-            # Consume first: an uncertain desktop response must never resend automatically.
+            target, mode, pending = self.target, self.mode, self.pending
+            # Consume before the native side effect; never retry uncertain sends.
             self.change(1)
             if mode == 3:
                 return self.broker.resolve(pending, target, 'allow')
             try:
-                sent = self.desktop.send_draft(target)
-                if sent:
-                    self.voice_text, self.voice_target = '', None
-                return sent
-            except (OSError, EOFError, RuntimeError, ValueError, KeyError, sqlite3.Error):
-                self.change(4, 'Send not confirmed.\nCheck PC input and chat.\nDo not retry blindly.')
-        elif command == 'record' and self.mode in (1, 2, 3) and (self.target or self.new_project is not None):
-            if self.mode == 3:
-                self.recording_review = (self.text, self.pending, self.page, set(self.seen), self.expires)
-            self.recording_text = (self.text if self.mode == 2 else
-                                   self.voice_text if self.voice_target == self.target else '')
-            self.change(5, 'Recording...\nRelease OK to transcribe\nMaximum: 30 seconds')
+                if self.draft and target == self.draft['id']:
+                    if self.draft['submitted']:
+                        return False
+                    self.draft['submitted'] = True
+                    if not self.desktop.send(target):
+                        self.draft['submitted'] = False
+                        return False
+                    self.desktop.invalidate_sessions()
+                    self.refresh_at = 0
+                    return True
+                return self.desktop.send(target)
+            except ComposerActionError as error:
+                if self.draft and target == self.draft['id'] and error.reason not in (
+                        'press-not-acknowledged', 'helper-failed'):
+                    self.draft['submitted'] = False
+                # These failures occur before Press. Only an uncertain dispatch
+                # should tell the user that sending could already have happened.
+                messages = {
+                    'accessibility-denied': '暂时无法发送\n请在电脑上为连接程序\n开启辅助功能权限',
+                    'app-unavailable': '暂时无法发送\n请在电脑上打开 Codex\n尚未发送任何内容',
+                    'windows-unavailable': '暂时无法发送\n请在电脑上打开 Codex\n尚未发送任何内容',
+                    'chat-not-found': '未找到所选会话\n请在电脑上打开该会话\n尚未发送任何内容',
+                    'chat-changed': '所选会话已变化\n请在电脑上检查会话\n尚未发送任何内容',
+                    'multiple-chat-views': '发现多个会话视图\n请在电脑上仅保留\n一个所选会话视图',
+                    'writable-editor-not-found': '未找到输入框\n请在电脑上检查该会话\n尚未发送任何内容',
+                    'multiple-writable-editors': '发现多个输入框\n请在电脑上关闭多余输入框\n尚未发送任何内容',
+                    'press-unsupported': '暂时无法发送\n请在电脑上操作 Codex\n尚未发送任何内容',
+                    'accessibility-tree-limit': '无法读取 Codex 界面\n请检查电脑端访问权限\n尚未发送任何内容',
+                    'accessibility-view-unavailable': '无法读取 Codex 界面\n请检查电脑端访问权限\n尚未发送任何内容',
+                    'composer-button-unavailable': '暂时无法发送\n请在电脑上检查输入框\n和会话控件',
+                    'multiple-composer-buttons': '发现多个发送按钮\n请在电脑上检查会话\n尚未发送任何内容',
+                    'send-disabled': '发送按钮不可用\n请在电脑上检查\n输入内容和附件',
+                    'send-input-required': '暂无可发送内容\n返回后在电脑上输入\n或长按确认键语音输入',
+                }
+                self.change(4, messages.get(error.reason,
+                    '尚未确认发送结果\n请在电脑上检查输入和会话\n确认结果后再决定是否重试'))
+            except (OSError, EOFError, RuntimeError, ValueError, KeyError, sqlite3.Error,
+                    subprocess.SubprocessError):
+                self.change(4, '尚未确认发送结果\n请在电脑上检查输入和会话\n确认结果后再决定是否重试')
+        elif command == 'record' and self.mode in (1, 3) and self.target:
+            if self.draft and self.target == self.draft['id'] and self.draft['submitted']:
+                return False
+            return self.start_dictation()
         else:
             return False
         return True
 
-    def transcript(self, text):
-        if self.mode != 5:
-            return
-        previous = self.recording_text
-        if text.strip():
-            segment = text.strip()
-            separator = ' ' if previous and previous[-1].isascii() and segment[0].isascii() else ''
-            voice = previous + separator + segment
-            if len(voice) > 12000:
-                self.recording_failed('Voice text limit reached.\nPress any key to dismiss.')
-                return
-            self.recording_text = ''
-            if self.new_project is not None:
-                self.change(2, voice)
-                return
-            try:
-                self.desktop.stage(self.target, voice)
-            except (OSError, EOFError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError):
-                self.recording_text = previous
-                self.recording_failed('PC input fill failed.\nNothing was sent.\nPress any key to dismiss.')
-                return
-            self.voice_text, self.voice_target = voice, self.target
-            if self.recording_review is not None:
-                self.restore_approval()
-            else:
-                self.change(1)
-        elif previous:
-            self.recording_text = ''
-            if self.recording_review is not None:
-                self.restore_approval()
-            else:
-                self.change(2, previous) if self.new_project is not None else self.change(1)
-        else:
-            self.recording_failed('No speech recognized.\nPress any key to dismiss.')
+    def start_dictation(self):
+        """Use the selected PC dictation backend; release never submits."""
+        if not self.pc_dictation_capable:
+            self.change(4, '请更新设备固件\n以使用电脑端语音输入\n尚未启动录音')
+            return False
+        if not self.target:
+            self.change(4, '请先在电脑上新建会话\n再在设备上选择该会话\n然后开始语音输入')
+            return False
+        prior = (self.text, self.pending, self.page, set(self.seen), self.expires) if self.mode == 3 else None
+        target = self.target
+        # Consume the physical token before any native side effect.
+        backend = '豆包语音输入' if getattr(self.desktop, 'dictation_backend', 'codex') == 'doubao' else 'Codex 语音输入'
+        self.change(10, f'使用电脑麦克风\n{backend}\n松开确认键插入文字')
+        try:
+            self.desktop.composer_action(target, 'dictate-start')
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            # A failed press/readiness acknowledgement can still have started
+            # capture. Cancel only our attempted capture in the same chat.
+            if isinstance(error, ComposerActionError) and error.reason in (
+                    'press-not-acknowledged', 'dictation-start-not-ready'):
+                try:
+                    self.desktop.composer_action(target, 'dictate-cancel')
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+                    pass
+            reason = error.reason if isinstance(error, ComposerActionError) else 'helper-failed'
+            messages = {
+                'accessibility-denied': '语音输入暂不可用\n请在电脑上为连接程序\n开启辅助功能权限',
+                'chat-not-found': '未找到所选会话\n请在电脑上打开该会话\n然后重试',
+                'accessibility-view-unavailable': '无法读取 Codex 界面\n请检查电脑端访问权限\n并查看连接程序日志',
+                'chat-changed': '所选会话已变化\n请在电脑上打开该会话\n然后重试',
+                'multiple-chat-views': '发现多个会话视图\n请在电脑上仅保留\n一个所选会话视图',
+                'multiple-writable-editors': '发现多个输入框\n请在电脑上关闭多余输入框\n然后重试',
+                'dictation-already-active': '语音输入正在进行\n请先在电脑上结束录音\n再长按确认键',
+                'composer-button-unavailable': '语音输入暂不可用\n请在电脑上检查\n所选会话的控件',
+                'dictation-start-not-ready': '语音输入尚未就绪\n请在电脑上检查\n麦克风权限提示',
+                'doubao-unavailable': '请在电脑上打开豆包输入法\n然后重试\n尚未启动录音',
+                'doubao-input-required': '请在电脑上切换至豆包输入法\n并将长按语音快捷键\n设为左 Control 键',
+                'modifier-held': '请松开电脑键盘上的\n修饰键\n然后重试',
+                'codex-focus-required': '请将电脑上的 Codex\n切换到前台后重试',
+                'composer-focus-failed': '输入框未获得焦点\n请在电脑上点击 Codex 输入框\n然后重试',
+                'doubao-state-unavailable': '无法读取豆包状态\n请检查电脑端访问权限\n然后重试',
+                'doubao-start-unconfirmed': '豆包语音面板未打开\n请在电脑上检查\n左 Control 键快捷设置',
+            }
+            self.change(4, messages.get(reason, '语音输入暂不可用\n请在电脑上检查 Codex\n并查看连接程序日志'))
+            return False
+        self.dictation_thread, self.dictation_review = target, prior
+        return True
 
-    def recording_failed(self, message):
-        """Keep PC input and the preceding bridge draft after a failed addition."""
-        self.recovery_text, self.recording_text = self.recording_text, ''
-        self.return_mode = 2 if self.new_project is not None and self.recovery_text else 1
-        self.change(4, message)
+    def finish_dictation(self, cancel=False):
+        target, self.dictation_thread = self.dictation_thread, None
+        if target is None:
+            return
+        try:
+            self.desktop.composer_action(target, 'dictate-cancel' if cancel else 'dictate-stop')
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            self.change(4, '请检查电脑端语音输入\n并在电脑上停止录音\n内容未自动发送')
+            return
+        if cancel:
+            self.dictation_review = None
+            self.change(4, '语音输入已中断\n请检查电脑端输入框\n内容未自动发送')
+        elif self.dictation_review is not None:
+            self.restore_approval()
+        else:
+            self.change(1)
 
     def restore_approval(self):
-        text, pending, page, seen, expires = self.recording_review
-        self.recording_review = None
+        text, pending, page, seen, expires = self.dictation_review
+        self.dictation_review = None
         self.change(3, text, pending)
         self.page, self.seen, self.expires = page, seen, expires
 
@@ -915,26 +1077,22 @@ class Review:
                 content = '\n'.join(lines)
                 fixed_rows = LIST_ENTRIES
             else:
-                content = self.error or 'No projects.\nOpen Codex on PC.'
+                content = self.error or '暂无项目\n请在电脑上打开 Codex'
         elif self.mode == 1:
-            if self.new_project is not None:
-                project = next((p['name'] for p in self.projects if p['id'] == self.new_project), 'Project')
-                try:
-                    heading = '\n'.join(self.renderer.summary(project, 2))
-                except UnsupportedText:
-                    heading = 'Project: view on PC'
-                content = heading + '\nNew chat\nHold OK to record.\nOK: send after recording.'
+            if self.draft and self.target == self.draft['id']:
+                content = ('正在同步新会话\n请稍候' if self.draft['submitted'] else
+                           '新会话\n长按确认键语音输入\n松开结束\n短按确认键发送')
             elif self.target:
                 lines, selection = self.session_rows()
                 content = '\n'.join(lines)
                 fixed_rows = LIST_ENTRIES
             else:
-                project = next((p['name'] for p in self.projects if p['id'] == self.project), 'Project')
+                project = next((p['name'] for p in self.projects if p['id'] == self.project), '项目')
                 try:
                     heading = '\n'.join(self.renderer.summary(project, 2))
                 except UnsupportedText:
-                    heading = 'Project: view on PC'
-                content = heading + '\nNo sessions yet.\nCreate a chat on PC.\nHold UP: Projects'
+                    heading = '请在电脑上查看项目'
+                content = heading + '\n暂无会话\n请在电脑上新建会话\n长按上键：查看项目'
         else:
             content = self.pages[self.page] + f'\n[{self.page+1}/{len(self.pages)}]'
         return bytes([self.mode]) + bytes.fromhex(self.token) + self.renderer.bitmap(
@@ -954,7 +1112,7 @@ class Review:
             try:
                 row = self.renderer.summary(session['title'], 1)
             except UnsupportedText:
-                row = ['Title: view on PC']
+                row = ['请在电脑上查看会话标题']
             if selected:
                 selection = (len(lines), len(lines) + len(row))
             lines.extend(row)
@@ -970,77 +1128,23 @@ class Review:
             try:
                 row = self.renderer.summary(project['name'], 1)
             except UnsupportedText:
-                row = ['Project: view on PC']
+                row = ['请在电脑上查看项目']
             if selected:
                 selection = (len(lines), len(lines) + len(row))
             lines.extend(row)
         return lines, selection
 
 
-class Transcriber:
-    def __init__(self, model, executable='whisper-cli', chinese_script='simplified', backend='auto'):
-        self.model, self.executable = Path(model), executable
-        if not self.model.is_file():
-            raise ValueError('Whisper model missing; configure --model before recording')
-        conversions = {'simplified': 't2s', 'traditional': 's2t', 'keep': None}
-        if chinese_script not in conversions:
-            raise ValueError('Unsupported Chinese script')
-        self.converter = None
-        if conversions[chinese_script]:
-            from opencc import OpenCC
-            self.converter = OpenCC(conversions[chinese_script])
-        if backend not in ('auto', 'server', 'cli'):
-            raise ValueError('Unsupported transcription backend')
-        server = shutil.which('whisper-server') if backend != 'cli' else None
-        if backend == 'server' and not server:
-            raise ValueError('whisper-server missing; install whisper.cpp or use --asr-backend cli')
-        self.worker = WhisperWorker(self.model, server) if server else None
-
-    def start(self):
-        if self.worker:
-            self.worker.start()
-
-    def close(self):
-        if self.worker:
-            self.worker.close()
-
-    def __call__(self, pcm):
-        if len(pcm) < 16000:
-            return ''
-        if len(pcm) % 2 or len(pcm) > 960000:
-            raise ValueError('Invalid recording size')
-        if self.worker:
-            return self.normalize(self.worker(pcm))
-        with tempfile.TemporaryDirectory(prefix='passport-voice-') as directory:
-            file = Path(directory) / 'voice.wav'
-            with wave.open(str(file), 'wb') as wav:
-                wav.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
-                wav.writeframes(pcm)
-            out = Path(directory) / 'text'
-            subprocess.run([self.executable, '-m', str(self.model), '-f', str(file), '-l', 'auto',
-                            '-otxt', '-of', str(out), '-np'], timeout=65, check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return self.normalize(out.with_suffix('.txt').read_text())
-
-    def normalize(self, text):
-        if self.converter:
-            text = self.converter.convert(text)
-        text = finish_sentence(text)
-        if len(text) > 12000:
-            raise ValueError('Transcript too long')
-        return text
-
 
 class InteractionServer:
-    def __init__(self, key, model, bind, font=None, desktop=None, chinese_script='simplified', asr_backend='auto'):
+    def __init__(self, key, bind, font=None, desktop=None, dictation_backend='codex'):
         self.key, self.bind = key, bind
-        self.desktop = desktop or Desktop()
+        self.desktop = desktop or Desktop(dictation_backend=dictation_backend)
         self.broker = Broker()
         self.renderer = Renderer(font)
         from dashboard import DashboardRenderer
         self.dashboard = DashboardRenderer(self.renderer)
         self.tracker = None
-        self.transcribe = Transcriber(model, chinese_script=chinese_script, backend=asr_backend)
         self.active = threading.Lock()
         self.target = None
         self.review = None
@@ -1048,7 +1152,8 @@ class InteractionServer:
                                          if hasattr(self.desktop, 'root') else None)
 
     def start(self):
-        self.transcribe.start()
+        self.desktop.prepare_composer()
+        print('语音输入方式：', '豆包' if getattr(self.desktop, 'dictation_backend', 'codex') == 'doubao' else 'Codex', '（使用电脑麦克风）', flush=True)
         self.broker.listen()
         server = socket.socket()
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1067,64 +1172,59 @@ class InteractionServer:
     def handle(self, sock):
         if not self.active.acquire(False):
             sock.close(); return
-        pcm = bytearray()
         review = None
         try:
             sock.settimeout(4)
             wire = SecureChannel(sock, self.key, server=True)
-            sock.settimeout(75)
+            sock.settimeout(8)
             review = getattr(self, 'review', None)
             if review is None:
                 self.review = review = Review(self.desktop, self.broker, self.renderer, self.selection)
-            # Reconnection resumes the in-memory draft but invalidates every
+            # Reconnection preserves selection/review but invalidates every
             # action token from the previous authenticated connection.
             review.token = uuid.uuid4().hex
+            review.pc_dictation_capable = False
             while True:
                 data = wire.receive()
-                if data[0] == 2:
-                    if review.mode != 5 or len(pcm) + len(data) - 1 > 16000 * 2 * 30:
-                        raise ValueError('Invalid audio stream')
-                    pcm.extend(data[1:])
-                    continue
                 if data[0] != 1:
-                    raise ValueError('Invalid action')
+                    raise ValueError('操作无效')
                 value = json.loads(data[1:])
+                review.pc_dictation_capable = value.get('pc_dictation') is True
                 command = value.get('cmd')
-                if command == 'stop' and review.mode == 5 and value.get('token') == review.token:
-                    try:
-                        review.transcript(self.transcribe(pcm))
-                    except (OSError, ValueError, subprocess.SubprocessError):
-                        review.recording_failed('Transcription failed.\nNothing was sent.\nPress any key to dismiss.')
-                    pcm.clear()
+                if command == 'stop' and review.mode == 10 and value.get('token') == review.token:
+                    review.finish_dictation()
                 elif command != 'sync':
                     review.action(command, value.get('token'))
                 screen = review.screen()
                 self.target = review.target
                 wire.send(screen)
+                sock.settimeout(35 if review.mode == 10 else 8)
                 # Opt-in keeps older clients' single-response framing intact.
                 # The home view is read-only and never selects an action target.
                 if value.get('home') is True:
                     from dashboard import overview
-                    activity = self.tracker.activity(time.monotonic()) if self.tracker else {}
                     with self.broker.lock:
                         pending = [p['thread'] for p in self.broker.pending.values()
                                    if not p['answer'] and p['expires'] > time.monotonic()]
-                    model = overview(activity, self.desktop.sessions(), pending)
+                    activity = self.tracker.activity(time.monotonic(), pending) if self.tracker else {'@sync': {'status': 'syncing'}}
+                    model = overview(activity, self.desktop.sessions(required=activity))
                     wire.send(self.dashboard.frame(model))
-        except (OSError, EOFError, ValueError, KeyError):
-            pass
+        except (OSError, EOFError, ValueError, KeyError) as error:
+            print('设备控制连接已断开：', type(error).__name__,
+                  '错误编号：', getattr(error, 'errno', None),
+                  '界面模式：', review.mode if review else None, flush=True)
         finally:
-            pcm.clear()
-            if review is not None and review.mode == 5:
-                review.recording_failed('Recording interrupted.\nNothing was sent.\nPress any key to dismiss.')
+            if review is not None and review.mode == 10:
+                review.finish_dictation(cancel=True)
             sock.close()
             self.target = None
             self.active.release()
 
     def close(self):
-        self.transcribe.close()
-        if hasattr(self.desktop, 'new_chats'):
-            self.desktop.new_chats.close()
+        if getattr(self, 'review', None) is not None and self.review.dictation_thread is not None:
+            self.review.finish_dictation(cancel=True)
+        if getattr(self.desktop, '_doubao', None) is not None:
+            self.desktop._doubao.close()
         for server in (getattr(self, 'server', None), getattr(self.broker, 'server', None)):
             if server:
                 server.close()

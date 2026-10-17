@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef enum { PET_OFFLINE, PET_IDLE, PET_WORKING, PET_WAITING, PET_DONE, PET_ERROR } pet_status_t;
+typedef enum { PET_OFFLINE, PET_IDLE, PET_WORKING, PET_WAITING, PET_DONE, PET_ERROR, PET_SYNCING } pet_status_t;
 typedef struct {
     pet_status_t status;
     unsigned active, waiting;

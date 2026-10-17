@@ -6,6 +6,9 @@ import tempfile
 import unittest
 import hmac
 import hashlib
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools/codex_pet'))
 
 spec = importlib.util.spec_from_file_location('bridge', Path(__file__).resolve().parents[1] / 'tools/codex_pet/bridge.py')
 bridge = importlib.util.module_from_spec(spec)

@@ -27,14 +27,14 @@ class OverviewTests(unittest.TestCase):
 
     def test_approval_without_hook_is_visible_and_deduplicated(self):
         activity = {identity('one'): {'status': 'working'}}
-        model = overview(activity, [], ['one', 'two'])
+        model = overview(activity, [{'id': 'one'}, {'id': 'two'}], ['one', 'two'])
         self.assertEqual((model['active'], model['waiting']), (2, 2))
         self.assertTrue(all(r['status'] == 'waiting' for r in model['rows']))
 
     def test_expired_turns_are_unknown_not_ready_or_active(self):
         tracker = Tracker()
         tracker.accept(compact_event({'hook_event_name': 'UserPromptSubmit', 'session_id': 'one'}), 1)
-        self.assertEqual(overview(tracker.activity(2), [])['status'], 'working')
+        self.assertEqual(overview(tracker.activity(2), [{'id': 'one'}])['status'], 'working')
         self.assertEqual(overview(tracker.activity(1801), [])['status'], 'error')
         self.assertEqual(overview(tracker.activity(1801), [])['active'], 0)
         self.assertEqual(overview({}, [])['status'], 'idle')
@@ -57,6 +57,19 @@ class OverviewTests(unittest.TestCase):
         model = overview({identity('one'): {'status': 'idle'}}, [])
         self.assertEqual((model['status'], model['rows']), ('idle', []))
 
+    def test_unknown_activity_does_not_occupy_rows_or_inflate_counts(self):
+        activity = {identity('known'): {'status': 'working'}, identity('unknown'): {'status': 'waiting'}}
+        model = overview(activity, [{'id': 'known', 'title': 'Real chat'}])
+        self.assertEqual((model['active'], model['waiting'], model['remaining']), (1, 0, 0))
+        self.assertEqual([row['title'] for row in model['rows']], ['Real chat'])
+        model = overview(activity, [])
+        self.assertEqual((model['status'], model['active'], model['rows']), ('syncing', 0, []))
+
+    def test_confirmed_chat_without_metadata_remains_visible_for_approval(self):
+        model = overview({identity('one'): {'status': 'waiting', 'confirmed': True}}, [])
+        self.assertEqual((model['status'], model['active'], model['waiting']), ('waiting', 1, 1))
+        self.assertEqual(model['rows'][0]['title'], '未命名会话')
+
     def test_turn_finished_animation_expires_without_claiming_success(self):
         tracker = Tracker()
         for event, now in (('UserPromptSubmit', 1), ('Stop', 2)):
@@ -76,14 +89,14 @@ class BitmapTests(unittest.TestCase):
             raise unittest.SkipTest('Requires local CJK font and bridge dependencies')
 
     def test_fixed_labels_coverage_and_negative_case(self):
-        texts = '需要你处理正在工作运行中待处理还有个会话按键查看全部暂无活跃会话'
+        texts = '需要你处理正在工作运行中待处理还有个会话按键查看全部暂无活跃会话未命名会话'
         texts += ''.join(text for labels in EMPTY_LABELS.values() for text, _ in labels)
         self.assertTrue(all(ord(char) in self.renderer.coverage for char in texts))
         self.assertEqual(self.dashboard.supported('\U0010ffff', 'View on PC'), 'View on PC')
 
     def test_frames_for_zero_one_many_and_long_cjk_titles(self):
         for count in (0, 1, 3, 5, 999):
-            activity = {identity(str(i)): {'status': 'waiting' if i < 2 else 'working'} for i in range(count)}
+            activity = {identity(str(i)): {'status': 'waiting' if i < 2 else 'working', 'confirmed': True} for i in range(count)}
             sessions = [{'id': str(i), 'title': '优化电子宠物界面与多会话展示' * 15,
                          'project': '超长中文项目名称' * 12} for i in range(min(count, 3))]
             model = overview(activity, sessions)
@@ -100,12 +113,12 @@ class BitmapTests(unittest.TestCase):
                 fitted = self.dashboard.fit(text, size, width, lines)
                 self.assertLessEqual(len(fitted), lines)
                 self.assertTrue(all(self.dashboard.fonts[size].getlength(line) <= width for line in fitted))
-        self.assertEqual(self.dashboard.fit('\U0010ffff', 14, 200), ['View text on PC'])
+        self.assertEqual(self.dashboard.fit('\U0010ffff', 14, 200), ['请在电脑上查看文字'])
 
     def test_idle_disconnect_and_unknown_have_distinct_readable_empty_messages(self):
         from unittest.mock import patch
         frames = []
-        for status in ('idle', 'offline', 'error'):
+        for status in ('idle', 'offline', 'error', 'syncing'):
             dashboard = DashboardRenderer(self.renderer)
             with patch.object(dashboard, 'text', wraps=dashboard.text) as draw_text:
                 frames.append(dashboard.frame({'status': status, 'active': 0, 'waiting': 0,
@@ -115,7 +128,7 @@ class BitmapTests(unittest.TestCase):
                 self.assertIn(message, texts)
             self.assertNotIn('等待状态同步', texts)
             self.assertNotIn('正在连接电脑工作状态', texts)
-        self.assertEqual(len(set(frames)), 3)
+        self.assertEqual(len(set(frames)), 4)
 
     def test_local_offline_bitmap_survives_without_bridge(self):
         from prepare_sprites import offline_bitmap
@@ -126,6 +139,14 @@ class BitmapTests(unittest.TestCase):
         self.assertEqual(offline_bitmap(self.renderer.source), frame[start:start + size])
         self.assertTrue(any(frame[start:start + size]))
 
+    def test_syncing_bitmap_is_available_before_encrypted_overview(self):
+        from prepare_sprites import status_bitmap
+        model = {'status': 'syncing', 'active': 0, 'waiting': 0, 'remaining': 0, 'rows': []}
+        frame = self.dashboard.frame(model)
+        start = 8 + SUMMARY_SIZE[0] * SUMMARY_SIZE[1] // 8
+        size = LIST_SIZE[0] * LIST_SIZE[1] // 8
+        self.assertEqual(status_bitmap('syncing', self.renderer.source), frame[start:start + size])
+
     def test_empty_messages_fit_and_missing_offline_glyphs_stop_import(self):
         from prepare_sprites import offline_bitmap
         from unittest.mock import patch
@@ -134,13 +155,13 @@ class BitmapTests(unittest.TestCase):
             for (text, _), size in zip(labels, (16, 12)):
                 self.assertEqual(self.dashboard.fit(text, size, 216), [text])
         with patch('interaction.Renderer', return_value=SimpleNamespace(coverage=set())):
-            with self.assertRaisesRegex(ValueError, 'CJK font'):
+            with self.assertRaisesRegex(ValueError, '支持中文的字体'):
                 offline_bitmap()
 
     def test_encrypted_overview_is_opt_in_and_never_changes_selection(self):
         from interaction import InteractionServer, SecureChannel, SelectionMemory, Broker, PIXELS
         class Desktop:
-            def sessions(self):
+            def sessions(self, required=()):
                 return [{'id': 'one', 'title': 'First', 'project': 'Alpha', 'project_id': 'a'},
                         {'id': 'two', 'title': 'Second', 'project': 'Beta', 'project_id': 'b'}]
             def projects(self):

@@ -45,10 +45,29 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_pet_control_layout.c -o "${test_dir}/test_pet_control_layout"
     "${test_dir}/test_pet_control_layout"
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_status_sync.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_bridge.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_interaction.py
-    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_new_chat.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_native_dictation.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_doubao_dictation.py
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        /usr/bin/clang -fobjc-arc -Wall -Wextra -Werror -framework AppKit \
+            -framework ApplicationServices tools/codex_pet/composer_action.m \
+            -o "${test_dir}/composer-action"
+        /usr/bin/clang -fobjc-arc -Wall -Wextra -Werror -framework AppKit \
+            -framework ApplicationServices tests/test_composer_action.m \
+            -o "${test_dir}/test-composer-action"
+        "${test_dir}/test-composer-action"
+        /usr/bin/clang -fobjc-arc -Wall -Wextra -Werror -framework AppKit \
+            -framework ApplicationServices -framework Carbon tools/codex_pet/doubao_dictation.m \
+            -o "${test_dir}/doubao-dictation"
+        /usr/bin/clang -fobjc-arc -Wall -Wextra -Werror -framework AppKit \
+            -framework ApplicationServices -framework Carbon tests/test_doubao_dictation.m \
+            -o "${test_dir}/test-doubao-dictation"
+        "${test_dir}/test-doubao-dictation"
+    fi
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_dashboard.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_codex_pet_chinese.py
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_ui_pixel_math.c main/ui_pixel_math.c \
         -o "${test_dir}/test_ui_pixel_math"

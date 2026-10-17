@@ -7,6 +7,523 @@ screen using the original blue Codex pet. Normal operation is wireless: the
 computer and AI Passport join the same 2.4 GHz Wi-Fi network, and the device runs
 from its battery. USB is needed for initial flashing or optional wired status.
 
+## Chinese messages
+
+All application-owned device labels, button hints, empty/error states, Wi-Fi
+setup pages and responses, bridge diagnostics, and command-line help use
+Simplified Chinese. Protocol keys, reason codes, commands, external chat/project
+names, and upstream ESP-IDF diagnostics retain their original identifiers.
+The native helper still recognizes the desktop application's English and
+Chinese accessibility labels.
+
+Fixed device labels use bundled Passport Sans subsets at 12/14/20 pixels;
+see the [font assets](../assets/README.md#fonts). Startup verifies every required
+glyph against each actual LVGL font descriptor, including a missing-glyph
+negative check. Dynamic desktop text continues to use locally rasterized
+bitmaps. A custom desktop font must cover the fixed Chinese message inventory;
+unsupported dynamic content directs the user to review it on the computer.
+Run `python3 tests/test_codex_pet_chinese.py` in the bridge environment to check
+message coverage, native reason translations, argument errors, font cmaps, and
+device-footer widths.
+
+On 2026-10-17, the user authorized flashing this version. The installed table
+has a 3 MiB factory application at `0x10000`, with the same NVS/PHY offsets as
+the template. The 2,754,928-byte application fits that existing partition.
+Only the application was written; the installed bootloader, partition table,
+NVS, PHY and resource partitions were retained. Flash hash verification passed.
+The flashed bundle is
+`build/firmware/ef5d82bb3aedbd5c33c0cc65f91463c8ae274df3fefb7a479aaab9e14fe8bb8a/`;
+application SHA-256 is
+`7d7aa14d650610d8107be9abf3e436352139c9776560a01c0a8e6d18535b86ef`,
+and matching ELF SHA-256 is
+`166e46b3b9a72e625219941d0f8c234a6c7576770ac0ba8ea1b83e078557d5c0`.
+
+A bounded 35-second startup capture matched ELF prefix `166e46b3b`, contained
+one application start with no font errors, crash markers or error-level logs,
+and confirmed Wi-Fi reconnection and a received task overview. Free heap / largest
+block were 77,900 / 69,632 bytes after initialization and 75,928 / 65,536 bytes
+with the overview active. The monitor was closed. The user confirmed normal
+Chinese status text, button hints and the chat list without boxes or clipping.
+Build: PASS. Host tests: PASS. Device tests: PASS for flashing, startup and the
+observed Chinese display. Unverified: uncommon error/setup states, extended
+runtime and minimum heap under all interactions.
+
+## Native new chat from Projects (2026-10-17)
+
+Holding Up on the selected saved project now opens Codex's native new-chat
+composer through `codex://new?mode=codex&projectId=...`. The bridge uses the
+project ID and Codex's own project selection and creation flow. It does not
+start a CLI turn or send an initial prompt.
+
+The card shows a temporary new-chat entry. Hold Confirm to use the configured
+PC dictation backend, release to finish inserting, then short-press Confirm to
+press native Send. The first message remains in the desktop composer. After
+sending, the card waits for the saved chat to appear before enabling further
+input. The temporary entry is kept across a device reconnect, but is not written
+to selection memory or retained after a bridge restart.
+
+Native draft controls require a unique project name and a matching project
+selector in the application shell. The native home heading picker is identified
+by its exact project name and renderer classes. It provides positive home-view
+evidence even if the sidebar retains saved-chat current markers. The labeled
+picker remains supported when there is no saved-chat current marker. Missing,
+renamed, duplicate, conflicting or changed targets fail closed. The current selector binding
+uses the installed desktop's English and Simplified Chinese accessible labels. Projectless groups
+cannot create a project chat. Repeated or stale button commands cannot open or
+submit twice; uncertain submission is not retried.
+
+Physical acceptance remains pending: project selection, native draft discovery,
+hold/release insertion, separate first-message submission, and saved-chat
+selection. This computer-side change reuses the existing firmware protocol;
+no firmware flash is required.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (static gate, native control simulations and focused bridge checks).
+Device tests: NOT RUN for this change. Unverified: the physical acceptance above,
+including the card's Chinese prompts and native draft discovery.
+Validation-only archive: `build/firmware/1816ae1dfd1d0afb8789be893f6a0659662a578f115895ed2ab858e6514927a9/`.
+Matching ELF SHA-256: `6ae359b5a14e01f2e7ff9be1c8c235b1aaf8d942339d8350f32dcc997af41f45`.
+The updated bridge was restarted after the active dictation ended, preserving
+the Doubao backend. The card reconnected with authenticated encrypted control
+and at least five successful synchronizations. No new-chat gesture or first
+message has been physically accepted yet; connection recovery alone is not
+feature acceptance. No firmware was flashed.
+
+The user confirmed native new-chat navigation but reported that holding Confirm
+returned `chat-not-found` before Doubao started. Logs showed no editor scan or
+button press. The previous detector required the labeled picker and rejected
+current sidebar markers, so it did not cover the installed native home heading
+picker. Host regressions now cover that picker with retained sidebar markers,
+wrong names, conflicting selectors, duplicate pickers, dialogs, embedded
+browsers and saved-chat routes. Doubao startup failures and normal completion
+forward only fixed numeric discovery schemas; names and input contents are
+never logged. Physical first-message acceptance remains pending for this fix.
+
+## Doubao PC dictation trial (2026-10-17)
+
+An opt-in bridge backend uses Doubao Input Method for PC microphone recognition
+while retaining Codex's native Send/Queue/Steer button. The installed Doubao
+1.0.2 settings show hold-to-talk with release-to-finish and real-time text.
+The user configured the hold shortcut to **Left Control**; Fn is unavailable on
+their keyboard. Keep Doubao selected as the current input method and keep Codex
+in front. The bridge does not change microphone selection or input-method settings.
+
+```bash
+python3 tools/codex_pet/bridge.py run --interactive --dictation-backend doubao
+```
+
+Hold Confirm to open the selected chat, uniquely identify and focus its message
+composer, then hold Left Control. Wait for the PC voice panel before speaking.
+Release Confirm to release Left Control and insert text. Short Confirm still
+presses Codex's native submit button. No Codex native Dictate button is pressed
+in this mode, and the bridge does not receive audio or transcript contents.
+The default backend remains `codex`.
+
+The helper rejects an existing unknown Doubao panel, held keyboard modifiers,
+ambiguous composers and an unverified focus. A bounded helper owns the key hold,
+checks the foreground app, editor, input source and selected chat, and releases on
+stop, EOF, signal or watchdog expiry. Normal release briefly waits for the voice
+panel to close before restoring Send; this is a UI observation, not proof of
+transcription accuracy or message delivery. Cancellation may leave partial text
+in the PC input and never sends it. Keep the target chat/input unchanged while
+speaking. Existing PC-dictation firmware is reused; this trial needs no flash.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (126 full-dependency bridge tests without skips, native focus
+and left-Control/panel simulations, and the complete static gate).
+Device tests: PASS for the observed physical control path: authentication, at
+least 30 encrypted synchronizations, three accepted hold/release cycles returning
+from mode 10 to mode 1, and one native submit press without a reported helper error.
+The last two PC start calls took 549/539 ms; stop calls took 556/568/571 ms and
+native submission took 573 ms. These are bridge-side control timings, not audio
+recognition or message-delivery measurements.
+The user subsequently confirmed successful PC-microphone voice entry, release
+inserting text without submitting, and a separate short Confirm submitting via
+the native Codex button. The test message arrived in this chat and the user
+reported no issues. The basic end-to-end flow passes physical acceptance;
+recognition latency is qualitatively accepted, with no instrumented ASR timing.
+Unverified: extended use, broader recognition accuracy, focus/chat changes,
+disconnection, watchdog expiry and interruption during transcription.
+Validation-only archive:
+`build/firmware/d2c6626899db6900e2c35c559b54a9c85d811ab17d67be296b6c8768bc748fb6/`.
+No firmware was flashed.
+
+## Empty-input confirmation (2026-10-17)
+
+The user reported another unavailable-submit result after the native submission
+label update. The log again shows one writable editor, zero scoped candidates,
+and no press. The earlier Queue/Steer compatibility change did not establish or
+resolve the cause of this repeated failure.
+
+The helper now reports fixed numeric counts of submit, dictation, stop, resume
+and voice controls. These distinguish an absent submit control from a submit
+control outside the accepted editor group. No labels, input text or chat
+identities are logged. Automatic retries remain disabled.
+The user subsequently confirmed that the input was empty and the PC displayed
+Voice or Resume. Short Confirm now recognizes either control in the same
+single-editor group when there is no submit control. It reports that there is
+no message to send and asks the user to return, type on the PC or hold Confirm
+to dictate. It does not press Voice/Resume or borrow another input's Send.
+
+An empty main composer also remains the target for long-Confirm dictation when
+a separate question input has its own Send/Dictate controls. Multiple matching
+empty composers remain ambiguous; changed chats are rejected. The helper still
+does not read input contents. Disabled submit controls remain a distinct state
+because they can reflect validation or attachments rather than empty input.
+Actual card rendering and empty-to-dictation-to-send acceptance remain unverified.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (117 full-dependency bridge cases and native simulations of
+empty input, nested controls, separate question inputs, ambiguity and chat changes).
+Device tests: NOT RUN for this fix; the final bridge restart restored authenticated
+encrypted synchronization. Unverified: physical notice rendering and dictation/send.
+No firmware write is needed for this computer-side change.
+
+Validation archive: `build/firmware/9aad91b93f198735e659a2c7b37186c070d62e1fc9f827b528e5b06aa382b61a/`.
+Matching ELF SHA-256: `12a265cbefad6e83287ab05522b6b83c0271e9c052aec17bd12423a471dc0cfd`.
+
+## Native submission during an active chat (2026-10-17)
+
+A reported short-Confirm failure found the selected chat and one writable input,
+but no matching submit button; the native helper did not press anything. The
+installed desktop uses Send when idle and Queue or Steer during an active run.
+The bridge previously accepted only Send. Short Confirm now accepts these three
+native submission labels and preserves the submission mode selected in Codex.
+Stop, Resume and Transcribe and send remain excluded. A disabled submit control
+is reported as disabled without pressing it.
+
+Failures before a press now show their specific cause; the uncertain-send warning
+is reserved for an unacknowledged press, timeout or unknown helper failure. Each
+confirmation still consumes its token before dispatch and never retries an
+uncertain send. Applying this computer-side fix requires restarting the bridge;
+it requires no firmware write. Actual active-run submission remains a physical
+acceptance check.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (complete host gate, native helper simulation, and 117
+full-dependency bridge regressions without skips).
+Device tests: NOT RUN for physical submission; the restarted bridge compiled
+the updated helper and resumed authenticated encrypted card synchronization.
+Unverified: actual idle/active-chat submission and the original reported symptom.
+
+Validation archive: `build/firmware/72a4b8e427a436c58974bf7c4e77980c70eb5162b5e2fadffafa5d3dc4dcb86b/`.
+Matching ELF SHA-256: `83046de7db3f465adfec2c6b858919d51cd70c68e71a184ba8b5a3a7efbcfa1a`.
+This validation did not flash the device.
+
+## Task identities and title synchronization (2026-10-17)
+
+The task overview uses the same user-chat directory as the card's chat selector.
+Source metadata excludes internal agents even when their `agent_path` is empty.
+Independent user chats remain separate; parent/child relationships do not merge
+their counts. An unrecognized lifecycle identity triggers a bounded background
+catalog refresh and a global syncing/unknown indication, never an extra task row.
+The footer can show synchronization while confirmed tasks remain visible.
+
+Title refresh failures retain the last successful catalog. A missing active
+identity requests an early background refresh, limited to one attempt per second
+and one worker at a time. Confirmed chats without cached titles remain actionable
+and show a Chinese unnamed-chat label. Fonts lacking the fixed Chinese glyphs
+are rejected before rendering.
+Successful catalog refreshes remove archived/deleted entries. A desktop-observed
+task is removed when owner discovery explicitly confirms it has unloaded, including
+tasks first seen through hooks. Read failures and newer hook events cannot clear
+those tasks; hook-only CLI sessions retain their existing lifecycle behavior.
+The overview protocol and firmware are unchanged; applying this fix requires a
+computer bridge restart.
+
+Build: PASS (shared ESP-IDF 5.5.3 firmware gate and independent archive verification;
+this change requires no firmware write).
+Host tests: PASS (115 full-dependency bridge regressions without skips, including
+20 status-sync and 17 overview checks; the complete static gate also passed).
+Device tests: PASS for authenticated reconnect, at least 30 encrypted syncs,
+and user-confirmed absence of the placeholder task with chat names/counts matching
+Codex. The observed overview contained three running chats and no waiting chats.
+Unverified: physical approval handling during metadata failure, unnamed-chat
+rendering, and unloaded-task cleanup; these have host regression coverage.
+
+## Send waiting state (2026-10-17)
+
+The user reported that short Confirm sends successfully but briefly shows a
+disconnected pet. Ordinary control views expire after three seconds, while a
+native Send request may wait up to 24 seconds. The existing local startup state
+covered Dictate only; Send retained the ordinary view during that wait. No new
+per-action connection trace has yet established an actual transport loss for
+the reported Send.
+
+The card now enters local mode 12 (SENDING) when its worker dispatches OK from
+chat-list mode 1. The UI shows a bounded sending state and consumes additional
+keys until the authenticated reply or transport failure replaces it. It remains
+online for less than 24 seconds; mode 0 still reports a real failure immediately.
+Project selection and approval confirmation do not enter SENDING. Mode 12 is
+never accepted from the wire, and the desktop still presses the actual Send
+button once. This requires a new application flash; it changes no partition,
+Wi-Fi, pairing or audio setting.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (complete host gate plus the full-dependency 116 bridge checks;
+button policy covers the three-second false-offline interval, 24-second limit,
+genuine failure, duplicate gestures, and Send/project/approval/Dictate mappings).
+Device tests: PASS for the authorized application-only write, verified Flash hash,
+matching boot ELF, retained Wi-Fi connection and received overview. A bounded
+35-second startup capture contained no crash markers; the first overview arrived
+at 10.515 seconds with 76,044 free heap bytes and a 65,536-byte largest block.
+Unverified: SENDING rendering, the reported Send/disconnect symptom and the latest
+desktop Dictate selection/latency; these still require physical button acceptance.
+
+Flashed archive: `build/firmware/199bbe9a3071c5762d3ac5300edddf95194b8661a4338156d6426a8602791cee/`.
+Full-image SHA-256: `199bbe9a3071c5762d3ac5300edddf95194b8661a4338156d6426a8602791cee`.
+Application: 2,744,640 bytes, SHA-256
+`fe03c6c873db08c74dadba6b047204aa06be63f74144de2b931111b281d65256`.
+Matching ELF SHA-256: `411eac983e720eb22494c9f7d07bffcf89ae2c6dad0dc59b9c74c69769c3a23d`.
+The application was written at `0x10000` (sectors through `0x2aefff`) on
+`/dev/cu.usbmodem21201`. A fresh installed-table read verified its MD5, bounds,
+non-overlap and the existing 3 MiB factory partition before writing. The installed
+bootloader, partition table and NVS were retained. The boot ELF prefix is
+`411eac983`; the serial monitor has been closed.
+
+## Native Codex dictation and Send (2026-10-16)
+
+Short Confirm opens the selected existing chat and presses its actual Send button.
+Hold Confirm starts that chat's native Dictate control using the PC microphone;
+release presses Stop dictation to insert text. Sending remains a separate short
+Confirm. Codex handles recognition and composer contents/settings. The card sends
+only key controls. The card recorder, Whisper, draft prefill and CLI new-chat
+executor have been deleted, along with input-mode switches. Create new chats on
+the PC, then select them on the card.
+
+The card firmware advertises PC-dictation support and uses mode 10 to wait for
+release without accessing audio hardware. Older firmware receives an update
+notice before any native microphone action. The desktop bridge is running in
+native mode, and the updated device has reauthenticated. On 2026-10-17 the user
+confirmed that holding Confirm starts native Codex Dictate. Sanitized bridge logs
+showed five record/release cycles returning to the chat list without reported
+composer errors. The user subsequently confirmed that release inserts text
+without sending and a separate short Confirm sends through the interface.
+The basic native Dictate/release/Send flow has passed physical acceptance.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (42 retained interaction regressions, 18 native-dictation/CLI
+checks without skips, synthetic native accessibility tests, and the complete host
+gate). Device tests: PASS for application write integrity, matching startup,
+preserved Wi-Fi/pairing, authenticated encrypted overview receipt, and
+user-confirmed native Dictate startup, insert-only release and short-press Send.
+Unverified: the PC DICTATION display and disconnect/timeout behavior.
+
+On 2026-10-16, with user approval, the verified 2,744,224-byte application was
+flashed through `/dev/cu.usbmodem21201` at `0x10000`. Chip detection confirmed
+ESP32-C3 and 8 MB Flash. The installed partition table passed MD5, bounds and
+overlap checks; its 3 MiB factory partition fits the application. Only
+`0x10000..0x2adfff` was erased/written, retaining the partition table, bootloader,
+NVS and auxiliary data partitions. Esptool verified the write hash. A bounded
+35-second startup observation matched ELF prefix `fca1ece48`, with no crash or
+watchdog markers. Wi-Fi reconnected using saved settings, and an authenticated
+encrypted overview arrived 10.707 seconds after boot (three running tasks, zero
+waiting tasks). Startup free heap/largest block were 77,940/69,632 bytes; at
+overview receipt they were 72,844/63,488 bytes. The serial port was closed. The
+application is 64,832 bytes smaller than the preceding candidate. Physical
+acceptance still requires holding Confirm while speaking into the PC microphone,
+releasing to insert without sending, then short-pressing Confirm to send.
+Archive: `build/firmware/7e5bb706492775239bd7389b4f7ea5915fd502cc6d7250981751727a7d0ece57/`.
+Full-image SHA-256: `7e5bb706492775239bd7389b4f7ea5915fd502cc6d7250981751727a7d0ece57`.
+Matching ELF SHA-256: `fca1ece4857853e9c37c12fdac5c649dd231f86413aadf6fed6b23a65ca90c16`.
+
+## Dictation startup latency and connection indicator (2026-10-17)
+
+The user accepted the native Dictate/release/Send flow, then reported a slow
+hold-to-Dictate response and the pet showing disconnected, mainly while waiting
+for Dictate to start. Startup previously
+repeated broad accessibility traversals and resolved the entire project catalog
+for its unique chat title. Current-chat discovery now visits shallow sidebar
+rows first, reuses role reads and skips static text; active dictation controls
+are checked together and readiness first checks the local composer group.
+Title lookup reads only saved chat names, retaining fresh uniqueness checks.
+A metadata-only local measurement was 264.1 ms for the old full catalog path
+and 35.1 ms median for the new title lookup; this is not end-to-end latency.
+A synthetic 1,000-level transcript requires fewer than 30 attribute reads for
+current-chat binding. Real startup timing remains unmeasured after this change.
+
+The card previously retained its normal chat-list state while waiting up to
+24 seconds for the start reply, but displayed OFFLINE after three seconds
+without a new view. The updated firmware enters local mode 11 (STARTING
+DICTATION) before that request, keeps the pending UI visible for at most
+24 seconds and consumes additional gestures. The authenticated reply or an
+actual transport failure replaces the pending state. Mode 11 is never accepted
+from the wire. Connection-loss/error handling is retained; actual Wi-Fi loss
+has not been established by the earlier logs. The bridge now logs numeric
+navigation/catalog/native timings and sanitized disconnect categories.
+
+The complete validation gate and independent firmware archive verification pass.
+Supplemental checks pass all 42 interaction tests and 21 native dictation checks;
+the synthetic native helper and button-policy checks also pass. On 2026-10-17,
+with user approval, the new application was flashed to the connected ESP32-C3.
+Device tests PASS for write integrity and bounded startup only; physical startup
+latency, pending-state rendering and connection stability remain unverified.
+
+Flashed bundle: `build/firmware/eb4cd690c9e07eb5a173b01e79eb66104379c4e39e32d3535eea447916c7574e/`.
+Application: 2,744,448 bytes, SHA-256
+`af8162f7d876cbc5770ee6292a47233fbc2c4126e9173b23ba9ac4ca74db5ae3`.
+Full-image SHA-256: `eb4cd690c9e07eb5a173b01e79eb66104379c4e39e32d3535eea447916c7574e`.
+Matching ELF SHA-256: `126d261784f91b2324edab469cc07a90fdff74d8ad4c5eba91e9c13e623dc39e`.
+The installed table passed MD5, bounds and overlap checks: its factory application
+is 3 MiB at `0x10000` on the detected 8 MiB Flash. Only application sectors
+`0x10000..0x2aefff` were written; the bootloader, partition table and NVS were
+retained. The write hash verified. A 35-second startup capture matched ELF prefix
+`126d26178`, contained no crash markers, obtained Wi-Fi and received the overview
+at 10.608 seconds. The running bridge recorded encrypted sync count 30. Startup
+free heap/largest block were 78,064/69,632 bytes and overview values were
+72,972/63,488 bytes. The monitor was closed. Startup latency, pending-state
+rendering and actual connection stability still require a physical
+hold/release/Send acceptance test.
+
+### Further native control scan optimization (2026-10-17)
+
+After the startup-state application flash, the user reported no remaining
+functional or connection-indicator issue, but Dictate still appeared 3–5 seconds
+after a hold. Four physical starts in the bridge log spent 5,455–7,037 ms inside
+the native helper, compared with 146–520 ms in navigation and 38–126 ms in title
+lookup. The native duration includes the readiness check after the button press;
+it does not directly measure when the microphone first becomes active.
+
+The helper now reads structural attributes in one accessibility batch per node,
+with individual-read fallback for providers without batching. One control scan
+collects editable paths and action buttons, and ancestor matching uses the
+collected paths. Fresh chat validation before pressing, exact action labels,
+manual-dictation rejection and readiness checks remain. Unreadable structural
+subtrees reject the action. Editor values and transcript contents are never
+requested. A synthetic 200-message tree starts Dictate in fewer than 500
+accessibility calls, including target revalidation and readiness. Replacement
+control groups, unsupported batching and unreadable-tree cases are covered.
+
+The helper reports only fixed numeric setup/target/controls/press/ready timings
+and control counts; the Python logger rejects unknown fields, nonnumeric and
+out-of-range values. A physical attempt after deployment failed with
+`multiple-writable-editors` before pressing anything. Selection was then refined
+to require exactly one editor in an action-bearing ancestor group, stopping
+before a shared ancestor containing multiple editors. Unrelated editable panels
+are covered by tests; multiple eligible composers still reject the action.
+Live button labels/enabled state and the chat are checked again before Press.
+
+The scoped revision is deployed through bridge PID 87859, with successful
+authentication and encrypted synchronization. A second physical attempt still
+found two editors and two eligible Dictate groups (291 buttons), so it safely
+rejected the action before Press. Its native duration was 2,569 ms: setup 213 ms,
+target 774 ms and controls 977 ms, with zero press/readiness time. These are
+failure timings, not a successful startup measurement. Structured test questions
+were open during these attempts; possible interference from their own input
+controls remains a hypothesis. The next physical test must use a plain chat
+reply with no pending test-question form. Those two device attempts failed in that test context; startup latency remains
+unverified. A subsequent desktop revision prefers the unique Dictate input whose
+own single-editor group also contains the chat Send button, including a disabled
+Send on an empty draft. Groups never borrow controls across another editor; two
+message composers remain ambiguous. Synthetic regressions cover a question input
+with Dictate beside the message composer, insert-only release and two actual
+message composers. The updated helper and a specific multiple-input error message
+are deployed in bridge PID 92476. Physical acceptance of this revision is NOT RUN;
+plain chat replies are used for subsequent tests instead of new test forms.
+
+The complete gate and independent archive verification pass; the final static
+rerun after the scoped correction passes, including 116 bridge regressions
+without skips (20 status-sync, 10 bridge, 45 interaction, 24 native dictation and
+17 dashboard cases), native helper simulation and the remaining repository tests.
+No firmware source changed and no additional flash was performed. Validation-only
+bundle: `build/firmware/4203ce536d222ff21f32c9c0a6801f6e0d81ad9783daff96e87c295edb98586d/`;
+full-image SHA-256 `4203ce536d222ff21f32c9c0a6801f6e0d81ad9783daff96e87c295edb98586d`,
+matching ELF `041c20378914b823894c2c719ab0db1a01a167d5061bf13cc0ddcfa8f9efcb16`.
+The card retains the previously flashed application and ELF above.
+
+## Native chat identification correction (2026-10-16)
+
+Physical holds returned `chat-not-found` before pressing Dictate. The user
+confirmed that navigation had opened the correct selected chat. Adding the
+installed desktop's `/dots/:conversationId` and `/o/:conversationId` routes did
+not resolve two subsequent physical attempts. Static bundle inspection then
+identified the structural difference: current sidebar chat rows are buttons with
+`aria-current="page"`, an accessible chat title and the `sidebar-item` class;
+they no longer expose a chat link. The helper had required a current link.
+
+The bridge now supplies a fresh title only when it uniquely identifies the
+selected chat in the local saved-chat catalog. The helper binds the trusted
+application shell through that exact title, the current-page marker, button role
+and sidebar class, while retaining URL matching for older link-based versions.
+Duplicate titles, missing metadata, changed chats and external browser views
+remain unbound. Titles travel only over helper stdin and are never logged.
+The card now distinguishes chat-discovery, permissions, unavailable controls and
+already-active dictation errors. Failed discovery also produces numeric
+view/link/current-marker counts only, triggered by a physical card action.
+
+A physical retry of the sidebar-button version also failed. Its diagnostic
+reported zero web areas, links and current markers: discovery never reached the
+web content, so the route/title changes did not resolve the observed failure.
+The activation request previously ignored its result and discovery started only
+from `AXWindows`. The latest bridge also reads the same application's main
+window, focused window and application children, deduplicating the same view
+while rejecting distinct ambiguous views. Failure diagnostics now include
+numeric root counts, attribute-read errors, activation status and readback.
+No readable web view is reported as `Codex UI not readable`, separately from a
+missing selected chat.
+
+Local binary string checks found `AXEnhancedUserInterface` in the installed
+framework, but did not find Electron's `AXManualAccessibility` in either the
+application or framework. The helper now falls back to the Chromium activation
+attribute only when the manual attribute is unsupported or accepted without any
+readback; an already-enabled enhanced interface is left enabled. Permission and
+communication errors do not trigger that fallback. Chromium's
+[application implementation](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/chrome_browser_application_mac.mm)
+can debounce activation for two seconds, so read-only discovery now allows up to
+four seconds instead of 1.6 seconds. Activation remains scoped to the target
+application. On 2026-10-17 the user confirmed that the final correction starts
+native Codex dictation on hold. The running bridge logged five record/release
+cycles, each returning from mode 10 to the chat list without composer errors or
+tracebacks. A subsequent sixth record/release cycle and one short Confirm
+were observed without reported errors. The user confirmed insert-only release
+and successful interface Send on the separate short press. Host regression checks cover current
+sidebar buttons, wrong titles, absent sidebar classes, duplicate catalog titles,
+stale routes, external browser views and numeric-only diagnostic logging.
+The flashed application remains the `7e5bb706...` bundle above; these are desktop
+bridge changes and require no firmware flash.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and archive verification).
+Host tests: PASS (complete host gate rerun after the final helper change; 42
+interaction, 15 dashboard and 21 native-dictation/CLI checks without skips,
+plus synthetic native accessibility tests). Device tests: PASS for user-confirmed
+native Dictate startup, insert-only release and separate interface Send after
+the application-root/Chromium activation changes; the earlier sidebar-only
+version failed. Unverified: disconnect/timeout behavior. Validation-only archive (not flashed):
+`build/firmware/47dcd95f284417b3c1ee45b2fd732944bc0bcae8a08be0e937e8073fbd1597fa/`.
+
+## Startup task synchronization (2026-10-15)
+
+The bridge reads already-running local desktop tasks at startup and reconciles
+later snapshots with live hooks. Before confirmation, the card shows a syncing
+message, faster blinking and three hopping violet dots; a timeout shows unknown
+status instead of claiming there are no tasks. The syncing text is also stored
+in firmware for the interval before the first encrypted overview arrives.
+A read-only desktop check found the first running task in about 0.10 seconds and
+all three in about 0.33 seconds; the full 194-chat sweep finished in 10.05 seconds.
+These are PC discovery measurements, not measured device display latency.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (144 bridge checks without skips, plus the repository C and other
+host checks). Device tests: PASS for application write integrity, matching startup,
+preserved Wi-Fi/pairing, encrypted task overview receipt, and user-confirmed
+physical task counts, syncing text and pet animation.
+Unverified: empty-task confirmation, timeout/recovery and disconnection.
+The firmware inputs were unchanged throughout validation. On 2026-10-16, with
+user approval, the verified application was flashed at `0x10000`; its 2,808,704
+bytes fit the installed 3 MiB factory partition. The installed partition table,
+bootloader, NVS and auxiliary data partitions were retained. The matching bridge
+was restarted and remains running. A bounded 40-second serial observation matched
+ELF prefix `849a94f00`, with no crash/watchdog markers. The device received an
+authenticated encrypted overview of two running tasks and zero waiting tasks
+10.679 seconds after boot. Startup free heap/largest block were 74,480/65,536 bytes;
+at overview receipt they were 72,504/61,440 bytes. The serial port was closed.
+The logs establish device receipt. The user subsequently confirmed normal task
+display/counts, syncing text and pet animation on the physical screen. End-to-end
+display latency was not measured.
+Archive: `build/firmware/915fdf61535cad831058d59f79be542de5217cdf8529b5ccdd06f2ef8a398452/`.
+Full-image SHA-256: `915fdf61535cad831058d59f79be542de5217cdf8529b5ccdd06f2ef8a398452`.
+Matching ELF SHA-256: `849a94f005ef57b71c0442fff859c425cf9188a7d12a4a7db5ca47a342cd39bf`.
+
 ## Plain-text source-position marks (2026-10-15)
 
 A subsequent physical test failed before submission: the desktop editor stored
@@ -349,9 +866,16 @@ real sidebar title and state; approvals/input take priority, with stable lifecyc
 insertion order within each group and a remaining-chat count. The overview covers
 all observed chats, independent of the selected voice/action target. A single chat
 gets a larger title area; when no chat is active the pet returns to 144-by-156.
-While the bridge is connected, no observed tasks or all closed sessions show
-the Chinese equivalents of “No tasks” and “Ready for your next task”, with the
-relaxed blinking pet. Idle sessions stay idle even after 30 minutes. An active
+On bridge startup, the home view shows the Chinese equivalents of “Syncing tasks”
+and “Reading PC task status”. The pet blinks faster with three violet dots hopping
+in sequence, distinct from its relaxed idle animation. A background read of the
+existing desktop owners discovers tasks already running before the bridge starts.
+Active results appear as they arrive; checking unloaded history does not hold them
+back. Only a complete successful scan with no active tasks permits “No tasks” and
+“Ready for your next task”, with the relaxed blinking pet. If initial synchronization
+has not succeeded within 15 seconds, show “Task state unknown” and retry; never
+turn a timeout into an empty-task claim. Known running/waiting tasks remain visible.
+The new syncing status (wire value 6) requires matching bridge and firmware updates. Idle sessions stay idle even after 30 minutes. An active
 turn without a lifecycle update for 30 minutes instead shows the Chinese
 equivalents of “Task state unknown” and “Check tasks on PC”; this does not
 claim completion or a connection failure.
@@ -367,13 +891,13 @@ project/chat; this first click only opens the screen. Hold DOWN in the session o
 project list to return to the pet immediately, preserving selection. Wi-Fi setup
 remains available by holding DOWN on the pet screen. After 10 seconds without
 button activity, the pet returns even while Codex is working. Bridge heartbeats
-and turn-state changes do not extend this timeout. Recording and transcription
-stay visible until completion, then begin a fresh 10-second window. A sleeping
-approval or new-chat draft resumes its existing screen without sending or deciding it.
+and turn-state changes do not extend this timeout. PC dictation stays visible
+until completion, then begins a fresh 10-second window. A sleeping approval
+resumes its request without deciding it.
 The bridge saves only the last chosen project/chat IDs in a private
 `codex-pet-selection.json` under its Codex directory, restoring them across control
 reconnections and bridge restarts. Archived or removed chats fall back to an available chat;
-an empty list cannot record or submit. Hold UP in the session list to browse saved
+an empty list cannot dictate or submit. Hold UP in the session list to browse saved
 projects, including empty projects. OK enters that project's complete saved-chat
 list, including chats that are not currently open on the PC.
 Project IDs keep equally named projects separate; unassigned chats appear under
@@ -497,15 +1021,16 @@ cancellation. A displayed review token, rather than the latest unseen network
 update, accompanies every action. Confirmation consumes a review before sending;
 a missing desktop acknowledgement displays an uncertain outcome and never retries.
 
-English labels use Montserrat. Dynamic Chinese text is rasterized on the computer
+Fixed labels use the bundled Chinese font subsets. Dynamic text is rasterized on the computer
 using a locally installed CJK font and transferred as a 216 × 224 one-bit image
 (6,048 bytes; 6,081 bytes per encrypted record including headers and tag).
 This control-panel size requires the matching bridge and firmware
 to be updated together; the independent home overview keeps its existing dimensions.
 The bridge checks the font's Unicode coverage before rendering;
 unsupported approval text disables confirmation and directs the user to the PC.
-Voice text is not rendered on the card and does not require card font coverage. Font files
-are not redistributed. The UI owns a small image buffer; PCM is streamed in
+Voice text is not rendered on the card and does not require card font coverage.
+System fonts are not redistributed; the bundled device subset is OFL-licensed.
+The UI owns a small image buffer; PCM is streamed in
 1,024-byte chunks without retaining a complete recording on the ESP32-C3.
 
 Wi-Fi credentials and the pairing key are stored in the application's NVS
@@ -593,8 +1118,8 @@ Installation preserves unrelated hooks, backs up an existing file, and adds
 handlers for session start/end, user prompts, tool start/end, approval requests,
 turn stops, and interrupts. **Review and trust the new hook definition in Codex;
 untrusted hooks are skipped.** Reload the Codex session/configuration as needed
-and start a new turn. The bridge cannot reconstruct sessions that started before
-it was running; the first complete observed turn establishes its state.
+and start a new turn. CLI-only sessions rely on observed hooks; local desktop
+sessions also receive the startup snapshot reconciliation described below.
 
 Lifecycle hooks send event kinds, hashed session/turn/tool IDs, and an input-wait
 flag to loopback UDP 19283. They do not forward prompts, results or assistant
@@ -610,10 +1135,17 @@ See [Codex's supported hook decisions](https://learn.chatgpt.com/docs/hooks).
 
 Status heartbeats use HMAC-SHA256 over UDP 19284 once per second. The key is not
 transmitted; increasing counters reject duplicate/reordered frames during a boot.
-Status is authenticated but unencrypted. Interactive mode follows the selected
-Session's observed hooks; a session without observed hooks remains unknown.
-A stopped turn is not proof of task success. Lost lifecycle events are not replayed;
-a crash with no terminal event becomes unknown after 30 minutes without hooks.
+Status is authenticated but unencrypted. The overview combines observed hooks with
+read-only snapshots of local desktop-owned chats, independently of the selected
+voice/action target. Owner discovery is pipelined on one temporary IPC connection;
+a sweep has a 12-second deadline and unsubscribes its snapshot observers. It starts
+at bridge startup and repeats 10 seconds after success, or 5 seconds after failure.
+Snapshots retain only status facts in memory and never log conversation content.
+Newer hooks, including session closure, take precedence over a concurrent snapshot.
+CLI chats continue to use hooks; remote/cloud execution is outside this local scan.
+An incompatible desktop IPC version produces unknown status instead of false idle.
+A stopped turn is not proof of task success. Lost hooks are not replayed; an active
+turn with neither fresh hooks nor a desktop snapshot for 30 minutes becomes unknown.
 
 Control, audio and rendered text use TCP 19285. A mutual HMAC challenge authenticates
 both peers with the pairing key; random client/server nonces derive separate
@@ -625,135 +1157,56 @@ range disconnect the companion. The computer bridge must remain running.
 
 ## Enable voice and Confirm
 
-Create a local Python environment and install
-[bridge dependencies](../tools/codex_pet/requirements.txt). Install `whisper-cli` and `whisper-server`
-from [whisper.cpp](https://github.com/ggml-org/whisper.cpp), then download a
-multilingual GGML model using its official model downloader (the English-only
-`.en` models do not cover Mandarin). The default model path is
-`~/.cache/ai-passport/ggml-base.bin`; use `--model` for another local model.
+Install the [bridge dependencies](../tools/codex_pet/requirements.txt) in a local
+Python environment and run the bridge with the Codex desktop open:
 
 ```bash
 python3 tools/codex_pet/bridge.py install-hooks
-python3 tools/codex_pet/bridge.py run --interactive --model /absolute/path/to/ggml-base.bin
+python3 tools/codex_pet/bridge.py run --interactive
 ```
 
-Trust/reload the updated hooks in Codex. No approval is enabled by changing the
-trust store automatically. The computer transcribes locally, without a model API
-key or uploading audio. Captures are 16 kHz, 16-bit, mono, limited to 30 seconds.
-Each recording uses Whisper's automatic language detection. Newly recognized text
-is normalized to Simplified Chinese with [OpenCC](https://github.com/yichen0831/opencc-python) by default before review,
-so separate segments do not alternate scripts. Existing desktop text and chat
-metadata are not converted. English and numbers remain intact. Each new recording
-gets a sentence-ending period when missing (`。` for Chinese-containing text, `.`
-for English); existing periods, question/exclamation marks and ellipses are retained.
-Use `--chinese-script traditional` for traditional output or `--chinese-script keep`
-to preserve the recognized Chinese script. Install the bridge requirements to obtain
-`opencc-python-reimplemented`; conversion is local and does not improve recognition
-accuracy or change a mistaken word into the intended word.
-By default, the bridge starts its own `whisper-server`, bound only to `127.0.0.1`,
-and loads the existing model before device recording. Subsequent recordings reuse
-that model with zero text context across requests; language detection remains
-automatic for Chinese, English and mixed speech. WAV requests stay in memory and
-the worker is stopped when the bridge closes. An empty private directory is used
-for its public-file root. If `whisper-server` is absent, `auto` uses the CLI; use
-`--asr-backend cli` to explicitly return to per-recording loading, or `server` to
-require the resident worker. A failed worker stops; the next recording can restart
-it. CLI temporary WAV/transcript files are private and deleted after conversion;
-a process crash may leave temporary files requiring manual cleanup.
-For existing chats, releasing OK transcribes and fills the selected PC input,
-then returns the card to the session list. Transcript text is never rendered or
-stored on the card. Clicking OK on that list sends the current PC input,
-including edits made on the computer, even when no voice was recorded. Empty
-or cleared PC input sends nothing; the bridge does not resend cached voice.
-Recording and filling do not start a turn. Only approval confirmation requires
-visiting every request page.
+Trust/reload the hooks in Codex. Native controls require macOS Accessibility access
+for the process launching the bridge, Codex microphone permission, and the updated
+card firmware. The microphone selected in Codex is used. No local recognizer,
+model download, audio upload from the card, or input-mode selection is needed.
+The old speech/model/language options, card recorder, PCM receiver, transcript
+cache/prefill and CLI first-message runner have been removed. Cached models and
+installed user software are not deleted.
 
-Consecutive recordings accumulate in bridge memory until sending or leaving
-the selected chat. Each fill replaces the PC input with the accumulated voice;
-it does not insert at the cursor or merge PC edits. The bridge waits up to 2.5
-seconds for a saved acknowledgement. If saving is delayed, it returns to the
-list with the fill pending; an accepted desktop route is not reported as a fill
-failure just because the draft has not reached disk. A failed route launch
-shows a dismissible error and never sends automatically; check
-the actual PC input if filling was not acknowledged. Failed or interrupted
-transcription keeps the preceding voice and PC text. Waiting, automatic
-pet return and authenticated control reconnection preserve this bridge draft;
-restarting the bridge loses it. No transcript or audio is written to the
-selection file. Prepared new chats keep their first voice message only in bridge
-memory and show a generic ready notice, without transcript text on the card.
+Choose an existing chat's project and title on the card, or hold Up in the
+project list to open a native new chat in the selected saved project. In the
+session list or new-chat view, hold Confirm to press the composer's Dictate button. Speak toward the
+computer microphone once PC DICTATION appears. Release Confirm to press Stop
+dictation, which inserts text; Transcribe and send is never pressed. Codex owns
+recognition, language, punctuation and insertion. Wait for the text to appear,
+then short-press Confirm to press the chat's Send button. The live composer owns
+attachments, mentions, settings, validation and clearing; the bridge does not
+read/reconstruct a saved draft or submit a turn through IPC. During an active run,
+Confirm presses the native Queue or Steer control according to Codex's current
+submission mode. Disabled controls and Stop/Resume are never pressed as Send.
 
-At each existing-chat confirmation, the bridge lets recent PC edits settle for
-0.8 seconds before reading only the selected chat's persisted composer text.
-An unacknowledged fill must reach disk as the expected voice or a changed PC
-text before sending; the previous PC text cannot be used while that fill is
-pending. Cleared input sends nothing. It checks the current text again after
-finding the desktop owner.
-If it changed during confirmation, nothing is sent. Plain strings and plain
-paragraph/text/hard-break documents are supported; attachments, mentions and
-formatted input require submission on the PC. IPC sending can leave the PC input
-intact; manage it on the computer. The screen token is consumed before submission,
-so a repeated event cannot retry an uncertain send. Check the selected chat on
-the PC if the outcome is unknown.
+Only one exactly identified chat view is accepted, using its page URL or current
+sidebar link. Embedded browser panels/dialogs cannot supply the controls. The
+`composer_action.m` helper is compiled once at bridge startup with Xcode Command
+Line Tools. It uses Accessibility actions, without screen coordinates, global
+keystrokes or desktop-state writes. Controls support English, Simplified Chinese
+and Traditional Chinese labels. A press acknowledgement is not proof of message
+delivery: Codex may still show validation or a confirmation dialog.
 
-Holding OK during an approval also records and fills PC input, then restores the
-same request, page and review progress. It neither approves nor sends. Clicking
-OK on the restored approval confirms that request after every page has been
-seen. Actual filling, current-input submission and approval remain device and
-desktop acceptance checks.
+The card advertises `pc_dictation: true` and accepts mode 10. Its worker waits
+for release without audio hardware access and sends Stop on release or after a
+30-second hold. Old firmware receives an update notice before PC capture starts.
+The bridge cancels its owned capture on disconnection, a 35-second receive timeout
+or shutdown. It rejects existing manual dictation. Stop/Cancel never navigate or
+fall back to Send. If cleanup cannot find the controls, stop dictation on the PC.
+Do not manually replace the same capture while holding the card button.
 
-For existing chats the desktop adapter uses the local thread owner's coordination
-IPC and never resumes a second executor. Only a confirmed new-chat first message
-starts a fresh `codex exec --json --cd <saved-project-folder> -` process; voice
-is passed through stdin without a shell or prompt logging. This uses existing
-CLI authentication and configuration, retains normal sandbox/hook-trust rules,
-and does not override the model or permissions. CLI settings may differ from the
-desktop composer; the bridge does not grant additional edit or approval rights.
-See [OpenAI's non-interactive CLI guide](https://developers.openai.com/codex/noninteractive).
-`CODEX_CLI_PATH` can select an installed executable; on macOS a matching installed
-Codex application bundle is checked before the PATH command. A broken CLI fails
-preparation without changing the installation or user configuration.
-
-The bridge tracks the fresh thread ID from JSON events and drains all remaining
-output without retaining it. It opens the chat on the desktop only after the CLI
-exits, then selects that exact chat after catalog discovery. Bridge recording,
-input filling and submission cannot take over a CLI-owned chat. Only one new-chat
-first turn runs at once. Do not open that chat manually before the first turn ends;
-keep the bridge running and stop gracefully with Ctrl+C. Canceling a submitted
-notice only changes navigation, not the submitted task. A failed/uncertain first
-turn asks for a PC check and never retries automatically. Abrupt bridge termination
-and manual desktop takeover still require acceptance testing.
-
-The adapter reads all nonarchived root-chat
-metadata, with no recent-chat limit or requirement for a loaded desktop owner.
-The background refresh updates the list as chats are created, archived or moved.
-Project membership resolves legacy IDs through the current local host's migration
-map and uses saved database roots for CLI chats without a project ID. Archived
-chats, subagents and bridge-owned first turns are excluded. Recording and input filling do
-not require a loaded desktop owner. Explicit device submission still uses an
-existing desktop owner; open the selected chat on the PC first if it is unloaded. This is a
-version-sensitive integration validated for the locally installed 0.160.0 CLI /
-October 2026 desktop code; future IPC/database changes must be revalidated.
-No private authentication database or account token is read.
-
-The initial controls cover voice follow-up submission and **tool permission**
-allow/deny. They do not answer arbitrary multi-choice questions, MCP elicitation,
-or sign-in dialogs. A busy/closed chat can reject a follow-up; an uncertain send
-result instructs the user to check that chat. Actual voice submission and real
-approval execution are device-acceptance checks, not inferred from mocks.
-
-For a device-free bridge check:
-
-```bash
-python3 tools/codex_pet/bridge.py run --dry-run
-```
-
-Optional wired mode needs pyserial and an explicitly chosen device port:
-
-```bash
-python3 tools/codex_pet/bridge.py run --port /dev/cu.usbmodemDEVICE
-```
-
-Do not open arbitrary ports or flash from connection detection alone.
+Confirm consumes the current screen token before any side effect; uncertain
+outcomes are not retried. Failure logs contain only reason codes. During an
+approval, hold/release operates dictation and restores the same request/page;
+short Confirm approves only that request after all pages have been seen. No
+transcript is shown or stored on the card. Cross-application/global dictation is
+outside this selected-chat integration.
 
 ## Validation and device acceptance
 
@@ -769,20 +1222,23 @@ and Android, automatic portal opening and both manual fallbacks, scan refresh an
 hidden/Unicode SSIDs, wrong-password/timeout retry, credential retention on failed
 connection and successful save/restart. Verify pet appearance/animations, first setup,
 wrong credentials, saved credentials, offline transition and reconnection. Check
-all three physical keys, press/release/long-press ordering, microphone level,
-30-second capture limit, Chinese review pagination, duplicate-title Session
+all three physical keys, press/release/long-press ordering, PC microphone,
+30-second hold limit, Chinese approval pagination, duplicate-title Session
 selection, cancellation, stale/expired Confirm, and actual Codex follow-up and
 tool approval/denial. Check that unrelated approvals and Session closure cannot
-redirect an action. Measure heap/largest block during audio, animation and Wi-Fi,
+redirect an action. Measure heap/largest block during dictation control, animation and Wi-Fi,
 and battery runtime. Compilation does not establish runtime/power behavior.
 
-Current delivery checkpoint: wireless status, Session buttons, streamed audio,
-local transcription, paged review and request-specific permission broker are
+Current delivery checkpoint: wireless status, Session buttons, native Codex
+dictation/Send, paged approvals and request-specific permission broker are
 implemented. Host tests and complete build identities are reported with delivery;
 complete functional acceptance and Codex write operations remain unverified. See the [device handoff](development/ai-guide.md#offer-on-device-testing)
 and [flashing/data policy](development/engineering/firmware-layout.md#flashing-and-stored-data).
 
-Verified local merged image: 2,809,024 bytes, SHA-256 `68972f2ebd773cdb2e37a081dc751f642754e771d937d26286a78ebfa727e6d3`.
+The following checkpoints record the retired implementation and do not establish
+physical acceptance of the current native controls.
+
+Historical merged image: 2,809,024 bytes, SHA-256 `68972f2ebd773cdb2e37a081dc751f642754e771d937d26286a78ebfa727e6d3`.
 Build: PASS. Host tests: PASS. Device tests: PASS for flash integrity, a bounded 25-second startup observation, Wi-Fi reachability and the encrypted bridge handshake only.
 Unverified: transcript accuracy, remaining button/review edge cases, reconnect behavior, and real permission execution.
 

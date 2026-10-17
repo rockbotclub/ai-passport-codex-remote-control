@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Privacy-minimal Codex lifecycle hooks -> loopback UDP -> authenticated Wi-Fi/USB pet snapshots."""
-import argparse
+from messages import ChineseArgumentParser, system_error
 import hashlib
 import hmac
 import getpass
@@ -10,6 +10,7 @@ from pathlib import Path
 import shlex
 import socket
 import sys
+import subprocess
 import time
 import threading
 
@@ -17,6 +18,8 @@ HOST, PORT = '127.0.0.1', 19283
 DEVICE_PORT = 19284
 PAIRING_PATH = Path.home() / '.config/ai-passport/codex-pet.json'
 EVENTS = ('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd')
+EVENT_LABELS = dict(zip(EVENTS, ('会话开始', '提交输入', '工具调用开始', '请求授权', '工具调用结束', '本轮结束', '中断', '会话结束')))
+STATUS_LABELS = {'offline': '电脑已断开', 'idle': '暂无任务', 'working': '正在工作', 'waiting': '需要你处理', 'done': '本轮已结束', 'error': '状态暂不确定', 'syncing': '正在同步任务'}
 WORKING = ('UserPromptSubmit', 'PreToolUse', 'PostToolUse')
 
 
@@ -34,9 +37,58 @@ def compact_event(value):
 
 
 class Tracker:
-    def __init__(self):
+    def __init__(self, sync=False):
+        self.sync_enabled = sync
+        self.sync_ready = not sync
+        self.sync_started = time.monotonic()
+        self.sync_failed = False
+        self.generation = 0
+        self.changed = {}
         self.sessions = {}
+        self.catalog = None
+        self.desktop_seen = set()
         self.lock = threading.RLock()
+
+    def set_catalog(self, catalog):
+        with self.lock:
+            self.catalog = {hashlib.sha256(identity.encode()).hexdigest()[:32]:
+                            hashlib.sha256(root.encode()).hexdigest()[:32] if root else None
+                            for identity, root in catalog.items()}
+
+    def needs_catalog(self, identity):
+        with self.lock:
+            return self.catalog is None or identity not in self.catalog
+
+    def revision(self):
+        with self.lock:
+            return self.generation
+
+    def reconcile(self, states, revision, now, complete, absent=()):
+        with self.lock:
+            for identity in absent:
+                if identity in self.desktop_seen and self.changed.get(identity, 0) <= revision:
+                    self.sessions.pop(identity, None)
+                    self.desktop_seen.discard(identity)
+            for identity, value in states.items():
+                if self.changed.get(identity, 0) > revision:
+                    continue  # A hook received during the read wins, including SessionEnd.
+                self.desktop_seen.add(identity)
+                previous = self.sessions.get(identity)
+                if previous and previous['status'] == value['status']:
+                    self.sessions[identity] = {**previous, 'seen': now if value['status'] in ('working', 'waiting') else previous['seen']}
+                else:
+                    self.sessions[identity] = {**value, 'seen': now}
+            if complete:
+                for identity, value in list(self.sessions.items()):
+                    if (value['event'] == 'Snapshot' and identity not in states
+                            and self.changed.get(identity, 0) <= revision):
+                        self.sessions.pop(identity)
+                        self.desktop_seen.discard(identity)
+                self.changed = {identity: generation for identity, generation in self.changed.items()
+                                if identity in self.sessions or generation > revision}
+                self.sync_ready = True
+            if complete is not None:
+                self.sync_failed = not complete
 
     def accept(self, message, now):
         with self.lock:
@@ -48,6 +100,8 @@ class Tracker:
         session = message.get('session')
         if not isinstance(session, str) or len(session) != 32:
             return
+        self.generation += 1
+        self.changed[session] = self.generation
         event = message['event']
         previous = self.sessions.get(session)
         if event == 'SessionEnd':
@@ -56,7 +110,7 @@ class Tracker:
         # A late SessionStart on resume must not erase an active turn.
         if event == 'SessionStart' and previous:
             return
-        if previous and event not in ('SessionStart', 'UserPromptSubmit') and message.get('turn') != previous['turn']:
+        if previous and previous['turn'] is not None and event not in ('SessionStart', 'UserPromptSubmit') and message.get('turn') != previous['turn']:
             return
         if event == 'PermissionRequest' or message.get('input'):
             status = 'waiting'
@@ -77,11 +131,28 @@ class Tracker:
         with self.lock:
             return self._snapshot(now, session)
 
-    def activity(self, now):
+    def activity(self, now, pending_threads=()):
         with self.lock:
-            return {identity: {**value, 'status': 'error' if value['status'] in ('working', 'waiting') and now - value['seen'] >= 1800 else
+            result = {identity: {**value, 'status': 'error' if value['status'] in ('working', 'waiting') and now - value['seen'] >= 1800 else
                               'done' if value['event'] == 'Stop' and now - value['seen'] < 8 else value['status']}
                     for identity, value in self.sessions.items()}
+            for thread in pending_threads:
+                result[hashlib.sha256(thread.encode()).hexdigest()[:32]] = {'status': 'waiting'}
+            if self.catalog is not None or self.sync_enabled:
+                visible = {}
+                for identity, value in result.items():
+                    if self.catalog is None or identity not in self.catalog:
+                        if value['status'] in ('working', 'waiting'):
+                            status = 'error' if now - value.get('seen', now) >= 15 else 'syncing'
+                            if visible.get('@metadata', {}).get('status') != 'error':
+                                visible['@metadata'] = {'status': status}
+                        continue
+                    if self.catalog[identity] is not None:
+                        visible[identity] = {**value, 'confirmed': True}
+                result = visible
+            if self.sync_enabled and (not self.sync_ready or self.sync_failed):
+                result['@sync'] = {'status': 'error' if self.sync_ready or now - self.sync_started >= 15 else 'syncing'}
+            return result
 
     def _snapshot(self, now, session=None):
         # Missing lifecycle events cannot prove a disconnected bridge. Only
@@ -96,6 +167,8 @@ class Tracker:
             status = 'working'
         elif 'error' in states:
             status = 'error'
+        elif 'syncing' in states:
+            status = 'syncing'
         elif 'done' in states:
             status = 'done'
         else:
@@ -145,7 +218,7 @@ def install_hooks(destination):
         json.dump(value, f, indent=2)
         f.write('\n')
     temporary.replace(path)
-    print(f'Added companion hooks to {path}. Review/trust them in Codex before use; existing hooks are preserved.')
+    print(f'已将宠物事件钩子添加到 {path}。使用前请在 Codex 中审阅并信任这些钩子；已有钩子已保留。')
 
 
 def wireless_packet(frame, key, sequence):
@@ -155,9 +228,9 @@ def wireless_packet(frame, key, sequence):
 
 
 def pair_device(host, path=PAIRING_PATH):
-    key = getpass.getpass('Pairing key from the device setup page: ').strip()
+    key = getpass.getpass('请输入设备配网页面上的配对密钥：').strip()
     if len(key) != 32 or any(c not in '0123456789abcdef' for c in key):
-        raise ValueError('The pairing key must contain 32 lowercase hex characters.')
+        raise ValueError('配对密钥必须是 32 位小写十六进制字符。')
     socket.getaddrinfo(host, DEVICE_PORT, socket.AF_INET, socket.SOCK_DGRAM)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.tmp')
@@ -166,11 +239,14 @@ def pair_device(host, path=PAIRING_PATH):
         json.dump({'host': host, 'key': key}, file)
         file.write('\n')
     temporary.replace(path)
-    print(f'Paired with {host}. Run the bridge with: python3 tools/codex_pet/bridge.py run')
+    print(f'已与 {host} 配对。请运行连接程序：python3 tools/codex_pet/bridge.py run')
 
 
 def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
-    tracker = Tracker()
+    tracker = Tracker(sync=True)
+    from status_sync import StatusSync
+    from interaction import Desktop
+    sync = StatusSync(interaction.desktop if interaction else Desktop(), tracker, diagnostics)
     if interaction:
         interaction.tracker = tracker
     connection = None
@@ -183,7 +259,8 @@ def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind((HOST, PORT))
         sock.settimeout(0.1)
-        print('Listening on loopback. Waiting for a Codex lifecycle event.', flush=True)
+        sync.start()
+        print('正在监听本机事件，并同步电脑端任务状态。', flush=True)
         try:
             while True:
                 now = time.monotonic()
@@ -193,10 +270,11 @@ def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
                     if not isinstance(message, dict):
                         continue
                     tracker.accept(message, now)
+                    sync.notify(message.get('session'))
                     if diagnostics and message.get('event') in EVENTS:
                         selected = interaction.target if interaction else None
                         matches = message.get('session') == hashlib.sha256(selected.encode()).hexdigest()[:32] if selected else False
-                        print(f"Lifecycle: {message['event']}; selected={matches}; tracked={len(tracker.sessions)}", flush=True)
+                        print(f"生命周期事件：{EVENT_LABELS[message['event']] }；匹配所选会话：{'是' if matches else '否'}；已跟踪会话数：{len(tracker.sessions)}", flush=True)
                     if interaction and message.get('event') in ('Stop', 'Interrupt', 'SessionEnd', 'UserPromptSubmit'):
                         with interaction.broker.lock:
                             threads = [v['thread'] for v in interaction.broker.pending.values()
@@ -211,11 +289,12 @@ def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
                 selected = interaction.target if interaction else None
                 if diagnostics and selected != previous_selection:
                     known = bool(selected and hashlib.sha256(selected.encode()).hexdigest()[:32] in tracker.sessions)
-                    print(f'Selected chat: observed={known}; tracked={len(tracker.sessions)}', flush=True)
+                    print(f'所选会话：{"已观察到" if known else "尚未观察到"}；已跟踪会话数：{len(tracker.sessions)}', flush=True)
                     previous_selection = selected
                 frame = tracker.snapshot(now)
                 if frame != previous:
-                    print(frame.decode().strip(), flush=True)
+                    state, active, waiting = frame.decode().split()[1:]
+                    print(f'任务状态：{STATUS_LABELS[state]}；活跃：{active}；待处理：{waiting}', flush=True)
                     previous = frame
                 if dry_run:
                     continue
@@ -224,7 +303,7 @@ def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
                     try:
                         wireless.sendto(wireless_packet(frame, pairing['key'], sequence), destination)
                     except OSError as error:
-                        print(f'Wi-Fi send failed: {error}; retrying', file=sys.stderr)
+                        print(f'Wi-Fi 发送失败：{system_error(error)}；正在重试', file=sys.stderr)
                     continue
                 try:
                     import serial
@@ -241,7 +320,7 @@ def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
                     if connection:
                         connection.close()
                         connection = None
-                    print(f'USB unavailable: {error}; retrying', file=sys.stderr)
+                    print(f'USB 不可用：{system_error(error)}；正在重试', file=sys.stderr)
         except KeyboardInterrupt:
             if wireless:
                 sequence = max(sequence + 1, time.time_ns())
@@ -252,6 +331,7 @@ def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
                 except OSError:
                     pass
         finally:
+            sync.close()
             if interaction:
                 interaction.close()
             if wireless:
@@ -261,27 +341,25 @@ def run_bridge(port, dry_run, pairing, interaction=None, diagnostics=False):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ChineseArgumentParser(description='将 Codex 任务状态同步至 AI-Passport 宠物设备。')
     sub = parser.add_subparsers(dest='command', required=True)
-    sub.add_parser('hook')
-    install = sub.add_parser('install-hooks')
+    sub.add_parser('hook', help='转发 Codex 生命周期事件')
+    install = sub.add_parser('install-hooks', help='安装宠物事件钩子')
     install.add_argument('--path', type=Path, default=Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'hooks.json')
-    pair = sub.add_parser('pair')
-    pair.add_argument('--host', required=True, help='IPv4 address shown on the pet')
+    pair = sub.add_parser('pair', help='配对 Wi-Fi 设备')
+    pair.add_argument('--host', required=True, help='设备上显示的 IPv4 地址')
     pair.add_argument('--config', type=Path, default=PAIRING_PATH)
-    run = sub.add_parser('run')
+    run = sub.add_parser('run', help='运行设备连接程序')
     run.add_argument('--config', type=Path, default=PAIRING_PATH)
-    run.add_argument('--port', help='Explicit AI-Passport serial port; never autodetect/open arbitrary devices')
+    run.add_argument('--port', help='指定 AI-Passport 串口；不会自动打开其他设备')
     run.add_argument('--dry-run', action='store_true')
     run.add_argument('--interactive', action='store_true')
-    run.add_argument('--diagnostics', action='store_true', help='Log event kinds and selection matches; never prompts or session IDs')
-    run.add_argument('--model', type=Path, default=Path.home() / '.cache/ai-passport/ggml-base.bin')
-    run.add_argument('--bind', default='0.0.0.0', help='LAN interface for encrypted control/audio')
-    run.add_argument('--font', type=Path, help='Locally installed CJK font')
-    run.add_argument('--chinese-script', choices=('simplified', 'traditional', 'keep'), default='simplified',
-                     help='Normalize Chinese speech transcripts before display and input filling')
-    run.add_argument('--asr-backend', choices=('auto', 'server', 'cli'), default='auto',
-                     help='Keep Whisper loaded locally when whisper-server is installed; cli reloads per recording')
+    run.add_argument('--dictation-backend', choices=('codex', 'doubao'), default='codex',
+                     help='电脑端语音输入方式；豆包的长按快捷键需设为左 Control 键')
+    run.add_argument('--diagnostics', action='store_true',
+                     help='记录事件类型、会话匹配结果和控制诊断；不记录语音文字或会话标识')
+    run.add_argument('--bind', default='0.0.0.0', help='加密控制使用的局域网监听地址')
+    run.add_argument('--font', type=Path, help='本地安装的中文字体')
     args = parser.parse_args()
     if args.command == 'hook':
         emit_hook()
@@ -293,23 +371,25 @@ def main():
         pairing = None
         if not args.dry_run and not args.port:
             if not args.config.exists():
-                parser.error('Pair the Wi-Fi device first: pair --host <device-IP>')
+                parser.error('请先配对 Wi-Fi 设备：pair --host <设备 IP>')
             pairing = json.loads(args.config.read_text())
+            if not isinstance(pairing, dict) or not isinstance(pairing.get('host'), str) or not pairing['host']:
+                parser.error('配对配置格式无效，请重新配对')
             key = pairing.get('key', '')
-            if len(key) != 32 or any(c not in '0123456789abcdef' for c in key):
-                parser.error('Invalid pairing key; pair again')
+            if not isinstance(key, str) or len(key) != 32 or any(c not in '0123456789abcdef' for c in key):
+                parser.error('配对密钥无效，请重新配对')
         if not args.dry_run and args.port:
             try:
                 import serial
             except ImportError:
-                parser.error('pyserial is required; activate ESP-IDF or install requirements.txt in a venv')
+                parser.error('需要 pyserial；请激活 ESP-IDF 环境，或在虚拟环境中安装 requirements.txt 中的依赖')
         interaction = None
         if args.interactive:
             if not pairing:
-                parser.error('Interactive mode requires a paired Wi-Fi device')
+                parser.error('交互模式需要已配对的 Wi-Fi 设备')
             from interaction import InteractionServer
-            interaction = InteractionServer(pairing['key'], args.model, args.bind, args.font,
-                                            chinese_script=args.chinese_script, asr_backend=args.asr_backend)
+            interaction = InteractionServer(pairing['key'], args.bind, args.font,
+                                            dictation_backend=args.dictation_backend)
             try:
                 interaction.start()
             except BaseException:
@@ -318,4 +398,11 @@ def main():
         run_bridge(args.port, args.dry_run, pairing, interaction, args.diagnostics)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('操作已取消。', file=sys.stderr)
+        sys.exit(130)
+    except (OSError, ValueError, RuntimeError, ImportError, subprocess.SubprocessError) as error:
+        print(f'连接程序运行失败：{system_error(error)}。', file=sys.stderr)
+        sys.exit(1)

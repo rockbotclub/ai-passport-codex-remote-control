@@ -21,7 +21,11 @@ int main(void) {
     frame[1] = PET_IDLE; assert(!pet_home_decode(frame, sizeof(frame), &view));
     frame[3] = 0; frame[6] = 0; assert(pet_home_decode(frame, sizeof(frame), &view));
     frame[1] = PET_OFFLINE; assert(pet_home_decode(frame, sizeof(frame), &view));
-    frame[1] = PET_ERROR + 1; assert(!pet_home_decode(frame, sizeof(frame), &view));
+    frame[1] = PET_SYNCING; assert(pet_home_decode(frame, sizeof(frame), &view));
+    assert(view.status == PET_SYNCING && view.active == 0);
+    frame[3] = 1; frame[6] = 1; assert(!pet_home_decode(frame, sizeof(frame), &view));
+    frame[3] = 0; frame[6] = 0;
+    frame[1] = PET_SYNCING + 1; assert(!pet_home_decode(frame, sizeof(frame), &view));
     puts("Pet overview packet tests: PASS");
     return 0;
 }

@@ -1,50 +1,50 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Codex Pet Wi-Fi</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codex 宠物配网</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}body{font:16px system-ui;background:#101826;color:#dce8fc;max-width:480px;margin:24px auto;padding:20px}
 h1{margin:0 0 8px}p{line-height:1.5}.muted{color:#9eafca}label{display:block;margin-top:18px}input,select,button{font:inherit;width:100%;padding:12px;margin:8px 0;border:1px solid #42516a;border-radius:10px;background:#172438;color:inherit}
 button{background:#75b8ff;color:#101826;font-weight:650;cursor:pointer}button.secondary{background:transparent;color:#dce8fc}button:disabled{opacity:.5;cursor:wait}.check{display:flex;align-items:center;gap:8px}.check input{width:auto}
 code{overflow-wrap:anywhere}details{margin-top:24px}#result{padding:14px;background:#172438;border-radius:10px}#result:empty{display:none}
 </style></head><body>
-<h1>Connect your pet</h1><p class="muted">Choose the same 2.4 GHz Wi-Fi your computer uses. Keep this setup Wi-Fi connected until the result appears.</p>
+<h1>连接你的宠物</h1><p class="muted">请选择与电脑相同的 2.4 GHz Wi-Fi。在显示连接结果之前，请保持设备热点连接。</p>
 <form id="setup">
-<label for="networks">Nearby Wi-Fi</label><select id="networks"><option value="">Enter a network name below</option></select>
-<button type="button" id="refresh" class="secondary">Refresh networks</button>
-<label for="ssid">Wi-Fi name</label><input id="ssid" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32">
-<label for="password">Password</label><input id="password" type="password" autocomplete="off" maxlength="63">
-<label class="check"><input id="show" type="checkbox">Show password</label>
-<button id="save">Connect</button></form><p id="result" role="status" aria-live="polite"></p>
-<details id="pairing"><summary>Desktop pairing key</summary><p>Save this key privately for the desktop bridge.</p><code id="key"></code><button type="button" id="copy" class="secondary">Copy key</button></details>
-<p class="muted">Hidden network? Type its name above. Guest networks with client isolation cannot connect the pet to your computer.</p>
+<label for="networks">附近的 Wi-Fi</label><select id="networks"><option value="">在下方输入网络名称</option></select>
+<button type="button" id="refresh" class="secondary">刷新网络列表</button>
+<label for="ssid">Wi-Fi 名称</label><input id="ssid" required oninvalid="this.setCustomValidity('请输入 Wi-Fi 名称')" oninput="this.setCustomValidity('')" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32">
+<label for="password">密码</label><input id="password" type="password" autocomplete="off" maxlength="63">
+<label class="check"><input id="show" type="checkbox">显示密码</label>
+<button id="save">连接</button></form><p id="result" role="status" aria-live="polite"></p>
+<details id="pairing"><summary>电脑端配对密钥</summary><p>请妥善保存此密钥，供电脑端连接程序配对使用。</p><code id="key"></code><button type="button" id="copy" class="secondary">复制密钥</button></details>
+<p class="muted">隐藏网络请在上方输入名称。开启客户端隔离的访客网络无法让宠物与电脑互相连接。</p>
 <script>
 const $=id=>document.getElementById(id), message=text=>{$('result').textContent=text};
 let busy=false, networkTimer;
-async function request(path,options){const response=await fetch(path,{cache:'no-store',...options});const data=await response.json();if(!response.ok)throw Error(data.message||'Please retry.');return data}
+async function request(path,options){const response=await fetch(path,{cache:'no-store',...options});const data=await response.json();if(!response.ok)throw Object.assign(Error(data.message||'请重试。'),{localized:true});return data}
 function setBusy(value){busy=value;for(const id of ['save','refresh','networks','ssid','password'])$(id).disabled=value}
 async function loadNetworks(refresh=false){
   clearTimeout(networkTimer);
-  try{const data=await request('/networks'+(refresh?'?refresh=1':''));const select=$('networks');select.replaceChildren(new Option(data.scanning?'Scanning…':'Enter a network name below',''));
-    for(const network of data.networks)select.add(new Option(network.ssid+(network.secure?'':' (open)'),network.ssid));
+  try{const data=await request('/networks'+(refresh?'?refresh=1':''));const select=$('networks');select.replaceChildren(new Option(data.scanning?'正在扫描…':'在下方输入网络名称',''));
+    for(const network of data.networks)select.add(new Option(network.ssid+(network.secure?'':'（无密码）'),network.ssid));
     if(data.scanning)networkTimer=setTimeout(()=>loadNetworks(),1200);
-  }catch(e){if(!busy)message('Network list unavailable. You can enter the Wi-Fi name manually.')}
+  }catch(e){if(!busy)message('无法获取网络列表，你可以手动输入 Wi-Fi 名称。')}
 }
 async function pollStatus(){
   try{const data=await request('/status');$('key').textContent=data.key;
-    if(data.state==='saved'){setBusy(true);$('password').value='';$('pairing').open=true;message('Connected! Save the pairing key below. The pet will restart; then rejoin your normal Wi-Fi.');return}
-    if(data.state==='connecting'){setBusy(true);message('Connecting… Keep this page open.');setTimeout(pollStatus,1000);return}
+    if(data.state==='saved'){setBusy(true);$('password').value='';$('pairing').open=true;message('连接成功！请保存下方配对密钥。宠物即将重启，之后请将手机或电脑切回常用 Wi-Fi。');return}
+    if(data.state==='connecting'){setBusy(true);message('正在连接…请保持此页面打开。');setTimeout(pollStatus,1000);return}
     setBusy(false);if(data.state==='failed')message(data.message);
-  }catch(e){setBusy(false);message('Setup connection interrupted. Check the pet screen. Reconnect to its setup hotspot if it is still in setup mode.')}
+  }catch(e){setBusy(false);message('配网连接已中断，请查看宠物屏幕。如果仍处于配网模式，请重新连接设备热点。')}
 }
 $('setup').onsubmit=async event=>{event.preventDefault();const ssid=$('ssid').value,password=$('password').value;
-  if(new TextEncoder().encode(ssid).length>32){message('Wi-Fi name must be at most 32 UTF-8 bytes.');return}
-  const size=new TextEncoder().encode(password).length;if(size&&(size<8||size>63)){message('Password must be empty for an open network, or 8–63 UTF-8 bytes.');return}
-  setBusy(true);clearTimeout(networkTimer);message('Connecting… Keep this page open.');
+  if(new TextEncoder().encode(ssid).length>32){message('Wi-Fi 名称最多为 32 个 UTF-8 字节。');return}
+  const size=new TextEncoder().encode(password).length;if(size&&(size<8||size>63)){message('无密码网络请留空；其他网络的密码需为 8–63 个 UTF-8 字节。');return}
+  setBusy(true);clearTimeout(networkTimer);message('正在连接…请保持此页面打开。');
   try{await request('/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})});pollStatus()}
-  catch(e){setBusy(false);message(e.message)}
+  catch(e){setBusy(false);message(e.localized?e.message:'连接请求失败，请检查设备热点后重试。')}
 };
 $('networks').onchange=()=>{if($('networks').value)$('ssid').value=$('networks').value};
 $('refresh').onclick=()=>loadNetworks(true);$('show').onchange=()=>{$('password').type=$('show').checked?'text':'password'};
-$('copy').onclick=async()=>{try{await navigator.clipboard.writeText($('key').textContent);$('copy').textContent='Copied'}catch(e){message('Select and copy the key below.');$('pairing').open=true}};
+$('copy').onclick=async()=>{try{await navigator.clipboard.writeText($('key').textContent);$('copy').textContent='已复制'}catch(e){message('请选中并复制下方密钥。');$('pairing').open=true}};
 loadNetworks();pollStatus();
 </script></body></html>

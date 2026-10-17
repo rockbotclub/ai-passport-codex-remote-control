@@ -14,32 +14,24 @@ import tempfile
 import sqlite3
 
 class Desktop:
-    def __init__(self):
-        self.sent, self.drafts, self.staged, self.created = [], {}, [], []
-        self.new_sent = []
-        self.job = {'status': 'running', 'thread': None, 'project': None}
+    """Model the native UI payload, not a bridge-side transcript cache."""
+    def __init__(self): self.sent, self.drafts, self.actions = [], {}, []
     def sessions(self): return [{'id': 'one', 'title': 'First', 'project': 'Alpha'}, {'id': 'two', 'title': 'Second', 'project': 'Beta'}]
     def projects(self):
         return list({s.get('project_id', s['project']): {'id': s.get('project_id', s['project']), 'name': s['project']}
                      for s in self.sessions()}.values())
-    def new_session(self, project): self.created.append(project)
-    def send_new(self, project, text):
-        self.new_sent.append((project, text))
-        self.job['project'] = project
-        return 'job'
-    def new_status(self, identity): return dict(self.job)
-    def owner(self, thread): raise AssertionError('Voice must not discover a desktop owner')
-    def send(self, thread, text): self.sent.append((thread, text))
-    def draft(self, thread): return self.drafts.get(thread, '')
-    def send_draft(self, thread):
-        text = self.draft(thread)
-        if not isinstance(text, str): raise ValueError('Unsupported PC input')
+    def composer_action(self, thread, action): self.actions.append((thread, action))
+    def invalidate_sessions(self): pass
+    def open_new_chat(self, project):
+        if project == '__projectless__': raise ValueError('saved project required')
+        self.actions.append((project, 'new'))
+        return {'id': '@new:pending', 'title': '新会话', 'project_id': project,
+                'project': next(p['name'] for p in self.projects() if p['id'] == project)}
+    def send(self, thread):
+        text = self.drafts.get(thread, '')
         if not text.strip(): return False
-        self.send(thread, text)
+        self.sent.append((thread, text))
         return True
-    def stage(self, thread, text):
-        self.drafts[thread] = text
-        self.staged.append((thread, text))
 
 class Renderer:
     def __init__(self): self.last = ''
@@ -59,6 +51,7 @@ class ProjectNavigationTests(unittest.TestCase):
         self.desktop.projects = lambda: [{'id':'a','name':'Same name'}, {'id':'b','name':'Same name'},
                                          {'id':'empty','name':'Empty project'}]
         self.review = Review(self.desktop, self.broker, Renderer())
+        self.review.pc_dictation_capable = True
         self.review.sync()
     def action(self, name): return self.review.action(name, self.review.token)
     def test_wake_enters_sessions_without_moving_or_sending_and_restores_choice(self):
@@ -72,7 +65,7 @@ class ProjectNavigationTests(unittest.TestCase):
         self.assertTrue(self.review.action('sessions', 'stale-navigation-token'))
         self.assertEqual((self.review.project, self.review.target), ('a', 'two'))
         self.assertEqual(self.desktop.sent, [])
-        self.assertEqual(self.desktop.staged, [])
+        self.assertEqual(self.desktop.actions, [])
 
     def test_selection_survives_reconnection_and_private_file_reload(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,16 +95,6 @@ class ProjectNavigationTests(unittest.TestCase):
                 path.write_text(data)
                 self.assertIsNone(SelectionMemory(path).target)
 
-    def test_wake_resumes_voice_and_approval_without_submitting_or_denying(self):
-        self.action('ok'); self.action('record'); self.review.transcript('draft')
-        self.assertTrue(self.action('sessions'))
-        self.assertEqual(self.review.mode, 1)
-        self.assertEqual(self.desktop.sent, [])
-        pending = self.broker.add({'session_id':'one','tool_name':'Bash'})
-        self.review.sync()
-        self.assertTrue(self.action('sessions'))
-        self.assertEqual(self.review.mode, 3)
-        self.assertIsNone(pending['answer'])
     def test_startup_is_projects_and_does_not_select_or_record_a_chat(self):
         frame = self.review.screen()
         self.assertEqual(frame[0], 7)
@@ -123,7 +106,7 @@ class ProjectNavigationTests(unittest.TestCase):
         self.assertNotIn('sessions', self.review.renderer.last)
         self.assertNotRegex(self.review.renderer.last, r'\[\d+/\d+\]')
         self.assertFalse(self.action('record'))
-        self.assertEqual(self.desktop.created, [])
+        self.assertEqual(self.desktop.actions, [])
     def test_enter_filters_by_id_and_back_restores_project_and_chat_selection(self):
         self.assertTrue(self.action('ok'))
         self.review.screen()
@@ -139,7 +122,7 @@ class ProjectNavigationTests(unittest.TestCase):
         self.action('up'); self.action('ok')
         self.assertIsNone(self.review.target)
         self.assertIn(b'\x01', self.review.screen()[:1])
-        self.assertIn('No sessions yet', self.review.renderer.last)
+        self.assertIn('暂无会话', self.review.renderer.last)
         self.assertFalse(self.action('record')); self.assertFalse(self.action('ok'))
         self.action('back'); self.assertEqual(self.review.project, 'empty')
         self.desktop.projects = lambda: []
@@ -157,111 +140,82 @@ class ProjectNavigationTests(unittest.TestCase):
         self.review.refresh_at = 0
         self.assertFalse(self.review.action('record', token))
         self.assertEqual(self.review.target, 'two')
-        self.assertEqual(self.desktop.staged, [])
-    def test_new_records_selected_project_and_confirm_submits_first_voice_once(self):
-        self.action('down'); token = self.review.token
-        self.assertTrue(self.review.action('new', token))
-        self.assertEqual(self.desktop.created, ['b'])
-        self.assertEqual(self.review.mode, 1)
-        self.assertIsNone(self.review.target)
-        self.assertEqual(self.review.new_project, 'b')
-        self.assertFalse(self.review.action('new', token))
-        self.review.screen(); self.assertIn('Hold OK to record', self.review.renderer.last)
-        self.assertFalse(self.action('ok'))
-        # Refresh and wake cannot retarget an uncreated draft to the old chat.
-        self.review.refresh_at = 0; self.review.sync(); self.action('sessions')
-        self.assertEqual((self.review.project, self.review.target), ('b', None))
-        self.assertTrue(self.action('record')); self.review.transcript('first')
-        self.assertTrue(self.action('record')); self.review.transcript(' second')
-        self.assertEqual(self.desktop.staged, [])
-        token = self.review.token
-        self.assertTrue(self.review.action('ok', token))
-        self.assertEqual(self.desktop.new_sent, [('b', 'first second')])
-        self.assertEqual(self.review.mode, 8)
-        self.assertFalse(self.review.action('ok', token))
-        self.assertFalse(self.action('record'))
-        self.action('back')
-        self.assertEqual(self.review.mode, 7); self.assertEqual(self.review.project, 'b')
-        self.action('ok'); self.assertFalse(self.action('new'))
-        self.assertEqual(self.desktop.sent, [])
+        self.assertEqual(self.desktop.actions, [])
 
-    def test_new_cancel_empty_speech_and_waiting_do_not_create_a_chat(self):
-        self.action('new'); self.action('record'); self.review.transcript('')
-        self.assertEqual(self.review.mode, 4)
-        self.action('back'); self.assertTrue(self.action('record'))
-        self.review.transcript('draft'); self.review.expires = 0; self.review.sync()
-        self.assertEqual((self.review.mode, self.review.target, self.review.text), (2, None, 'draft'))
-        self.assertTrue(self.action('record')); self.review.transcript('continued')
-        self.assertEqual(self.review.text, 'draft continued')
-        self.action('cancel')
-        self.action('back')
-        self.assertEqual(self.review.mode, 7)
-        self.assertIsNone(self.review.new_project)
-        self.assertEqual(self.desktop.new_sent, [])
-
-    def test_new_send_failure_consumes_confirm_without_automatic_retry(self):
-        self.action('new'); self.action('record'); self.review.transcript('voice')
-        token = self.review.token
-        with patch.object(self.desktop, 'send_new', side_effect=EOFError()) as submit:
-            self.assertTrue(self.review.action('ok', token))
-            self.assertEqual(self.review.mode, 4)
-            self.assertFalse(self.review.action('ok', token))
-            self.assertFalse(self.action('record'))
-            self.review.sync(); self.review.screen(); submit.assert_called_once_with('a', 'voice')
-        self.action('back'); self.assertEqual(self.review.mode, 7)
-
-    def test_new_handoff_selects_only_created_thread_after_cli_exit(self):
-        self.action('new'); self.action('record'); self.review.transcript('voice'); self.action('ok')
-        self.rows.insert(0, {'id':'new','title':'Created','project':'Same name','project_id':'a'})
-        self.desktop.job['thread'] = 'new'
-        self.review.sync(); self.assertEqual(self.review.mode, 8)
-        self.desktop.job['status'] = 'complete'
-        self.review.sync()
-        self.assertEqual((self.review.mode, self.review.target), (1, 'new'))
-        self.assertEqual(self.review.selection.target, 'new')
-        self.assertTrue(self.action('record'))
-
-    def test_new_failure_after_thread_creation_is_not_reported_as_sent(self):
-        self.action('new'); self.action('record'); self.review.transcript('voice'); self.action('ok')
-        self.desktop.job.update(status='failed', thread='partial')
-        self.review.sync(); self.assertEqual(self.review.mode, 4)
-        self.assertIn('Do not retry blindly', self.review.text)
-        self.assertFalse(self.action('ok'))
-        self.action('back'); self.assertEqual(self.review.mode, 7)
-    def test_new_failure_consumes_action_and_returns_to_projects(self):
-        with patch.object(self.desktop, 'new_session', side_effect=TimeoutError()) as create:
-            token = self.review.token
-            self.action('new')
-            self.assertEqual(self.review.mode, 4)
-            self.assertFalse(self.review.action('new', token)); self.assertEqual(create.call_count, 1)
-        self.action('back'); self.assertEqual(self.review.mode, 7)
-    def test_back_discards_voice_and_back_from_approval_denies_exact_request(self):
-        self.action('ok'); self.action('record'); self.review.transcript('draft')
-        self.action('back'); self.assertEqual(self.review.mode, 7)
-        self.assertEqual(self.desktop.drafts, {'one': 'draft'})
-        self.assertEqual(self.review.text, '')
-        self.action('ok')
-        pending = self.broker.add({'session_id':'one','tool_name':'Bash'})
-        other = self.broker.add({'session_id':'other','tool_name':'Bash'})
-        self.review.sync(); self.action('back')
-        self.assertEqual(pending['answer'], 'deny'); self.assertIsNone(other['answer'])
-        self.action('back'); self.review.sync(); self.assertEqual(self.review.mode, 7)
     def test_recording_rejects_back_and_new_without_retargeting(self):
         self.action('ok'); self.action('record')
         self.assertFalse(self.action('back')); self.assertFalse(self.action('new'))
-        self.assertEqual(self.review.target, 'one'); self.assertEqual(self.review.mode, 5)
+        self.assertEqual(self.review.target, 'one'); self.assertEqual(self.review.mode, 10)
     def test_unassigned_sessions_have_a_group_and_cannot_create_in_another_project(self):
         from interaction import PROJECTLESS
-        self.rows.append({'id':'loose','title':'Standalone','project':'No project','project_id':PROJECTLESS})
+        self.rows.append({'id':'loose','title':'Standalone','project':'无项目','project_id':PROJECTLESS})
         self.review.refresh_at = 0; self.review.sync(); self.action('up')
         self.assertEqual(self.review.project, PROJECTLESS)
-        self.assertFalse(self.action('new')); self.assertEqual(self.desktop.created, [])
+        self.assertTrue(self.action('new')); self.assertEqual(self.desktop.actions, [])
         self.action('back'); self.action('ok'); self.assertEqual(self.review.target, 'loose')
+
+    def test_new_uses_selected_project_and_first_message_native_controls_once(self):
+        self.action('down')
+        token = self.review.token
+        self.assertTrue(self.review.action('new', token))
+        self.assertFalse(self.review.action('new', token))
+        self.assertEqual(self.desktop.actions, [('b', 'new')])
+        self.assertEqual((self.review.mode, self.review.target), (1, '@new:pending'))
+        self.assertIsNone(self.review.selection.target) # Drafts never survive bridge restarts.
+        self.review.action('sessions', '')
+        self.assertEqual((self.review.project, self.review.target), ('b', '@new:pending'))
+        self.review.screen(); self.assertIn('长按确认键语音输入', self.review.renderer.last)
+        self.action('record'); self.review.finish_dictation()
+        self.assertEqual(self.desktop.actions[-2:], [('@new:pending', 'dictate-start'),
+                                                    ('@new:pending', 'dictate-stop')])
+        self.assertEqual(self.desktop.sent, [])
+        self.desktop.drafts['@new:pending'] = 'PC-owned first message'
+        token = self.review.token
+        self.assertTrue(self.review.action('ok', token))
+        self.assertFalse(self.review.action('ok', token))
+        self.assertFalse(self.action('ok')); self.assertFalse(self.action('record'))
+        self.assertEqual(len(self.desktop.sent), 1)
+        self.rows.insert(0, {'id': 'created', 'title': 'New saved chat', 'project_id': 'b', 'project': 'Same name'})
+        self.review.refresh_at = 0; self.review.sync()
+        self.assertEqual(self.review.target, 'created'); self.assertIsNone(self.review.draft)
+        self.review.action('sessions', '')
+        self.assertEqual((self.review.project, self.review.target), ('b', 'created'))
+        self.assertNotIn('@new:pending', [s['id'] for s in self.review.sessions])
+
+    def test_empty_project_can_create_and_back_retains_unsent_draft(self):
+        self.action('up'); self.action('new')
+        self.action('back'); self.assertEqual(self.review.project, 'empty')
+        self.action('ok'); self.assertEqual(self.review.target, '@new:pending')
+
+    def test_failed_new_consumes_token_and_returns_to_selected_project(self):
+        import subprocess
+        token = self.review.token
+        with patch.object(self.desktop, 'open_new_chat', side_effect=subprocess.TimeoutExpired('open', 5)) as create:
+            self.assertTrue(self.review.action('new', token))
+            self.assertFalse(self.review.action('new', token)); create.assert_called_once_with('a')
+        self.assertEqual(self.review.mode, 4)
+        self.assertIsNone(self.review.draft)
+        self.action('cancel'); self.assertEqual((self.review.mode, self.review.project), (7, 'a'))
+
+    def test_new_chat_empty_input_remains_editable_but_uncertain_send_cannot_repeat(self):
+        from interaction import ComposerActionError
+        self.action('new')
+        with patch.object(self.desktop, 'send', side_effect=ComposerActionError('send-input-required')):
+            self.action('ok')
+        self.assertFalse(self.review.draft['submitted'])
+        self.action('cancel')
+        self.assertTrue(self.action('record')); self.review.finish_dictation()
+        with patch.object(self.desktop, 'send', side_effect=ComposerActionError('press-not-acknowledged')) as send:
+            self.action('ok'); self.action('cancel')
+            self.assertFalse(self.action('ok')); self.assertFalse(self.action('record'))
+            send.assert_called_once()
+        self.assertTrue(self.review.draft['submitted'])
 
 class InteractionTests(unittest.TestCase):
     def setUp(self):
         self.desktop, self.broker = Desktop(), Broker()
         self.review = Review(self.desktop, self.broker, Renderer())
+        self.review.pc_dictation_capable = True
         self.review.sync()
         self.review.action('ok', self.review.token)
     def action(self, name): return self.review.action(name, self.review.token)
@@ -272,222 +226,6 @@ class InteractionTests(unittest.TestCase):
         self.assertTrue(self.review.action('ok', token))
         self.assertFalse(self.review.action('ok', token))
         self.assertEqual(self.desktop.sent, [('one', 'Typed on PC')])
-
-    def test_transcript_returns_to_list_and_never_reaches_card_renderer(self):
-        self.action('back'); self.action('down'); self.action('ok')
-        self.assertEqual(self.review.target, 'two')
-        self.assertTrue(self.action('record'))
-        self.assertFalse(self.action('down'))
-        self.review.transcript('private voice|second page')
-        self.assertEqual(self.desktop.staged, [('two', 'private voice|second page')])
-        self.assertEqual((self.review.mode, self.review.text), (1, ''))
-        self.review.screen()
-        self.assertEqual(self.review.renderer.last, 'Second')
-        self.assertEqual(self.review.renderer.fixed_rows, LIST_ENTRIES)
-        self.assertNotIn('private voice', ''.join(self.review.pages))
-        self.assertEqual(self.desktop.sent, [])
-
-    def test_confirm_uses_pc_edits_instead_of_cached_voice(self):
-        self.action('record'); self.review.transcript('voice only')
-        token = self.review.token
-        self.desktop.drafts['one'] = 'Edited on PC'
-        self.review.sync(); self.review.screen()
-        self.assertEqual(self.review.token, token)
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', 'Edited on PC')])
-        self.assertEqual(self.review.voice_text, '')
-
-    def test_empty_or_cleared_pc_input_does_not_resend_voice(self):
-        for draft in ('', '   '):
-            with self.subTest(draft=draft):
-                self.action('record'); self.review.transcript('voice')
-                self.desktop.drafts['one'] = draft
-                self.assertFalse(self.action('ok'))
-                self.assertEqual(self.review.mode, 1)
-        self.assertEqual(self.desktop.sent, [])
-
-    def test_multiple_recordings_accumulate_in_bridge_and_fill_pc_only(self):
-        self.desktop.drafts['two'] = 'other chat'
-        self.action('record'); self.review.transcript('第一段。')
-        self.action('record'); self.review.transcript('第二段。')
-        self.assertEqual(self.review.voice_text, '第一段。第二段。')
-        self.assertEqual(self.desktop.staged, [('one', '第一段。'), ('one', '第一段。第二段。')])
-        self.assertEqual(self.desktop.drafts['two'], 'other chat')
-        self.assertEqual((self.review.mode, self.review.text), (1, ''))
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', '第一段。第二段。')])
-
-    def test_empty_additional_recording_keeps_pc_text_without_refilling(self):
-        self.action('record'); self.review.transcript('first segment')
-        self.action('record'); self.review.transcript('   ')
-        self.assertEqual((self.review.mode, self.review.text), (1, ''))
-        self.assertEqual(self.desktop.staged, [('one', 'first segment')])
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', 'first segment')])
-
-    def test_back_keeps_pc_input_and_next_recording_starts_new_voice(self):
-        self.action('record'); self.review.transcript('previous voice')
-        self.action('back'); self.action('ok')
-        self.assertEqual(self.desktop.drafts['one'], 'previous voice')
-        self.action('record'); self.review.transcript('new voice')
-        self.assertEqual(self.review.voice_text, 'new voice')
-        self.assertEqual(self.desktop.staged[-1], ('one', 'new voice'))
-        self.assertEqual(self.desktop.sent, [])
-
-    def test_input_filling_failure_reports_error_and_preserves_pc_text(self):
-        self.desktop.drafts['one'] = 'keep this'
-        with patch.object(self.desktop, 'stage', side_effect=TimeoutError()) as stage:
-            self.action('record'); self.review.transcript('new voice')
-            self.assertEqual(self.review.mode, 4)
-            self.assertNotIn('new voice', self.review.text)
-            self.action('cancel')
-            self.assertEqual((self.review.mode, self.review.text), (1, ''))
-            stage.assert_called_once_with('one', 'new voice')
-        self.assertEqual(self.desktop.drafts['one'], 'keep this')
-        self.assertEqual(self.desktop.sent, [])
-
-    def test_oversized_accumulated_voice_is_bounded_before_input_filling(self):
-        self.action('record'); self.review.transcript('a' * 12000)
-        self.action('record'); self.review.transcript('b')
-        self.assertEqual(self.review.mode, 4)
-        self.assertFalse(self.action('ok'))
-        self.assertEqual(len(self.desktop.staged), 1)
-        self.assertEqual(self.desktop.sent, [])
-        self.action('cancel')
-        self.assertEqual((self.review.mode, self.review.text), (1, ''))
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', 'a' * 12000)])
-
-    def test_waiting_and_wake_keep_voice_without_displaying_it(self):
-        self.action('record'); self.review.transcript('old voice')
-        self.review.expires = 0
-        self.review.sync(); self.action('sessions')
-        self.action('record'); self.review.transcript('fresh voice')
-        self.assertEqual(self.review.voice_text, 'old voice fresh voice')
-        self.review.screen()
-        self.assertEqual(self.review.renderer.last, 'First')
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(self.desktop.sent, [('one', 'old voice fresh voice')])
-        self.action('record'); self.review.transcript('next instruction')
-        self.assertEqual(self.review.voice_text, 'next instruction')
-
-    def test_voice_does_not_require_card_font_coverage(self):
-        from interaction import UnsupportedText
-        original = self.review.renderer.pages
-        def pages(text):
-            if '\U0010ffff' in text:
-                raise UnsupportedText('Unsupported text. View on PC.')
-            return original(text)
-        with patch.object(self.review.renderer, 'pages', side_effect=pages):
-            self.action('record'); self.review.transcript('voice \U0010ffff')
-        self.assertEqual((self.review.mode, self.review.text), (1, ''))
-        self.assertEqual(self.desktop.staged, [('one', 'voice \U0010ffff')])
-
-    def test_approval_confirm_never_sends_pc_input_and_hold_only_transcribes(self):
-        self.desktop.drafts['one'] = 'PC draft'
-        pending = self.broker.add({'session_id': 'one', 'tool_name': 'Bash',
-                                   'tool_input': {'command': 'first|second'}})
-        self.review.sync(); self.action('up')
-        self.assertTrue(self.action('record'))
-        self.review.transcript('voice during approval')
-        self.assertEqual((self.review.mode, self.review.page), (3, 1))
-        self.assertIsNone(pending['answer'])
-        self.assertEqual(self.desktop.sent, [])
-        self.assertEqual(self.desktop.drafts['one'], 'voice during approval')
-        self.assertTrue(self.action('ok'))
-        self.assertEqual(pending['answer'], 'allow')
-        self.assertEqual(self.desktop.sent, [])
-
-    def test_failed_approval_recording_restores_request_without_denying(self):
-        pending = self.broker.add({'session_id': 'one', 'tool_name': 'Bash'})
-        self.review.sync(); self.action('record')
-        self.review.recording_failed('Transcription failed.')
-        self.action('cancel')
-        self.assertEqual(self.review.mode, 3)
-        self.assertIsNone(pending['answer'])
-        self.assertEqual(self.desktop.sent, [])
-
-    def test_one_voice_instruction_survives_errors_waiting_and_encrypted_reconnections(self):
-        try: import cryptography
-        except ImportError: self.skipTest('Bridge requires cryptography')
-        import json
-        from interaction import InteractionServer
-        for new_chat in (False, True):
-            with self.subTest(new_chat=new_chat):
-                desktop = Desktop()
-                ready_mode = 2 if new_chat else 1
-                server = InteractionServer.__new__(InteractionServer)
-                server.key, server.desktop = 'a' * 32, desktop
-                server.broker, server.renderer = Broker(), Renderer()
-                server.active, server.target = threading.Lock(), None
-                server.selection = SelectionMemory()
-                outcomes = iter(('第一段。', ValueError('Inference failed'), '第二段。', '第三段。'))
-                def transcribe(pcm):
-                    result = next(outcomes)
-                    if isinstance(result, Exception):
-                        raise result
-                    return result
-                server.transcribe = transcribe
-                def connect():
-                    client, accepted = socket.socketpair()
-                    client.settimeout(2)
-                    worker = threading.Thread(target=server.handle, args=(accepted,))
-                    worker.start()
-                    return client, worker, SecureChannel(client, server.key)
-                def request(wire, command, token=''):
-                    wire.send(b'\x01' + json.dumps({'cmd': command, 'token': token}).encode())
-                    reply = wire.receive()
-                    self.assertEqual(len(reply), 17 + PIXELS)
-                    return reply[0], reply[1:17].hex()
-                def record(wire, token, expected):
-                    mode, token = request(wire, 'record', token)
-                    self.assertEqual(mode, 5)
-                    wire.send(b'\x02' + bytes(1024))
-                    mode, token = request(wire, 'stop', token)
-                    self.assertEqual(mode, expected)
-                    return token
-                client, worker, wire = connect()
-                try:
-                    mode, token = request(wire, 'sync'); self.assertEqual(mode, 7)
-                    mode, token = request(wire, 'new' if new_chat else 'ok', token)
-                    token = record(wire, token, ready_mode)
-                    server.review.expires = 0
-                    mode, token = request(wire, 'sync'); self.assertEqual(mode, ready_mode)
-                    token = record(wire, token, 4)
-                    mode, token = request(wire, 'cancel', token); self.assertEqual(mode, ready_mode)
-                    self.assertEqual((server.review.text if new_chat else server.review.voice_text), '第一段。')
-                    token = record(wire, token, ready_mode)
-                    self.assertEqual((server.review.text if new_chat else server.review.voice_text), '第一段。第二段。')
-                    stale = token
-                finally:
-                    client.close(); worker.join(2)
-                self.assertFalse(worker.is_alive())
-                client, worker, wire = connect()
-                try:
-                    mode, token = request(wire, 'sessions'); self.assertEqual(mode, ready_mode)
-                    self.assertNotEqual(token, stale)
-                    mode, token = request(wire, 'ok', stale); self.assertEqual(mode, ready_mode)
-                    mode, token = request(wire, 'record', token); self.assertEqual(mode, 5)
-                    wire.send(b'\x02' + bytes(1024))  # Lose only the unfinished addition.
-                finally:
-                    client.close(); worker.join(2)
-                self.assertFalse(worker.is_alive())
-                self.assertEqual(desktop.sent + desktop.new_sent, [])
-                client, worker, wire = connect()
-                try:
-                    mode, token = request(wire, 'sync'); self.assertEqual(mode, 4)
-                    mode, token = request(wire, 'cancel', token); self.assertEqual(mode, ready_mode)
-                    self.assertEqual((server.review.text if new_chat else server.review.voice_text), '第一段。第二段。')
-                    token = record(wire, token, ready_mode)
-                    self.assertEqual(desktop.sent + desktop.new_sent, [])
-                    mode, fresh = request(wire, 'ok', token)
-                    self.assertEqual(mode, 8 if new_chat else 1)
-                    request(wire, 'ok', token)
-                finally:
-                    client.close(); worker.join(2)
-                self.assertFalse(worker.is_alive())
-                self.assertEqual(desktop.new_sent if new_chat else desktop.sent,
-                                 [('Alpha' if new_chat else 'one', '第一段。第二段。第三段。')])
 
     def test_session_list_displays_only_titles_in_five_fixed_slots(self):
         self.review.screen()
@@ -510,6 +248,7 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(self.desktop.sent, [])
     def test_approval_bound_to_session_and_all_pages(self):
         pending = self.broker.add({'session_id': 'one', 'tool_name': 'Bash', 'tool_input': {'command': 'first|second'}})
+        self.review.pc_dictation_capable = True
         self.review.sync()
         self.assertEqual(self.review.mode, 3)
         self.assertFalse(self.action('ok'))
@@ -532,108 +271,11 @@ class InteractionTests(unittest.TestCase):
                 else: self.broker.invalidate('one')
                 self.assertFalse(self.review.action('ok', token))
                 self.assertIsNone(pending['answer'])
-    def test_review_delegates_filling_without_discovering_owner_or_submitting(self):
-        with patch.object(self.desktop, 'owner', side_effect=EOFError()) as owner, \
-                patch.object(self.desktop, 'draft', side_effect=ValueError()) as draft, \
-                patch.object(self.desktop, 'send', side_effect=TimeoutError()) as send:
-            self.assertTrue(self.action('record'))
-            self.review.transcript('hello')
-            self.review.sync(); self.review.screen()
-            owner.assert_not_called(); draft.assert_not_called(); send.assert_not_called()
-        self.assertEqual((self.review.mode, self.review.text), (1, ''))
 
-    def test_unknown_send_consumed_no_retry(self):
-        self.action('record'); self.review.transcript('hello')
-        self.desktop.send = lambda *args: (_ for _ in ()).throw(TimeoutError())
-        self.action('ok')
-        self.assertEqual(self.review.mode, 4)
-        self.assertFalse(self.action('ok'))
-    def test_desktop_eof_during_send_is_uncertain_and_not_retried(self):
-        self.action('record'); self.review.transcript('hello')
-        with patch.object(self.desktop,'send_draft',side_effect=EOFError('Connection closed')) as send:
-            token=self.review.token
-            self.assertTrue(self.review.action('ok',token))
-            self.assertEqual(self.review.mode,4)
-            self.assertFalse(self.review.action('ok',token))
-            self.assertEqual(send.call_count,1)
-    def test_empty_speech_and_cancel_never_send(self):
-        self.action('record'); self.review.transcript('   ')
-        self.assertEqual(self.review.mode, 4)
-        self.action('cancel')
-        self.action('record'); self.review.transcript('hello')
-        self.action('cancel')
-        self.assertEqual(self.desktop.sent, [])
-        self.assertEqual(self.desktop.drafts, {'one': 'hello'})
-    def test_speech_errors_can_dismiss_navigate_and_record_again_on_same_connection(self):
-        try: import cryptography
-        except ImportError: self.skipTest('Bridge requires cryptography')
-        import json
-        from interaction import InteractionServer
-        for result in ('', '   ', ValueError('Inference failed')):
-            for new_chat in (False, True):
-                with self.subTest(result=result, new_chat=new_chat):
-                    desktop = Desktop()
-                    server = InteractionServer.__new__(InteractionServer)
-                    server.key, server.desktop = 'a'*32, desktop
-                    server.broker, server.renderer = Broker(), Renderer()
-                    server.active, server.target = threading.Lock(), None
-                    server.selection = SelectionMemory()
-                    outcomes = iter((result, 'retry voice'))
-                    def transcribe(pcm):
-                        outcome = next(outcomes)
-                        if isinstance(outcome, Exception):
-                            raise outcome
-                        return outcome
-                    server.transcribe = transcribe
-                    a,b = socket.socketpair()
-                    a.settimeout(2)
-                    worker = threading.Thread(target=server.handle,args=(b,)); worker.start()
-                    try:
-                        with a:
-                            wire = SecureChannel(a,'a'*32)
-                            def request(command, token=''):
-                                wire.send(b'\x01'+json.dumps({'cmd':command,'token':token}).encode())
-                                reply = wire.receive()
-                                self.assertEqual(len(reply),17+PIXELS)
-                                return reply[0],reply[1:17].hex()
-                            mode,token = request('sync'); self.assertEqual(mode,7)
-                            mode,token = request('new' if new_chat else 'ok',token)
-                            self.assertEqual(mode,1)
-                            mode,token = request('record',token); self.assertEqual(mode,5)
-                            recording_token = token
-                            wire.send(b'\x02'+bytes(1024))
-                            mode,token = request('stop',token); self.assertEqual(mode,4)
-                            if not isinstance(result, Exception):
-                                self.assertIn('No speech recognized', server.renderer.last)
-                            self.assertIn('Press any key to dismiss.', server.renderer.last)
-                            error_token = token
-                            mode,token = request('cancel',recording_token); self.assertEqual(mode,4)
-                            self.assertEqual(token,error_token)
-                            # Waking an error after local inactivity must still allow dismissal.
-                            mode,token = request('sessions'); self.assertEqual(mode,4)
-                            mode,token = request('cancel',token); self.assertEqual(mode,1)
-                            self.assertEqual(server.target,None if new_chat else 'one')
-                            self.assertEqual(desktop.sent,[])
-                            self.assertEqual(desktop.new_sent,[])
-                            self.assertEqual(desktop.staged,[])
-                            mode,token = request('record',token); self.assertEqual(mode,5)
-                            wire.send(b'\x02'+bytes(1024))
-                            mode,token = request('stop',token); self.assertEqual(mode,2 if new_chat else 1)
-                            mode,token = request('cancel',token); self.assertEqual(mode,1)
-                            mode,token = request('back',token); self.assertEqual(mode,7)
-                            mode,token = request('down',token); self.assertEqual(mode,7)
-                            mode,token = request('ok',token); self.assertEqual(mode,1)
-                            self.assertEqual(server.target,'two')
-                            self.assertEqual(desktop.sent,[])
-                            self.assertEqual(desktop.new_sent,[])
-                    finally:
-                        a.close()
-                        worker.join(2)
-                    self.assertFalse(worker.is_alive())
     def test_eof_is_not_infinite_loop(self):
         a,b=socket.socketpair();b.close()
         with a, self.assertRaises(EOFError): exact(a, 4)
-    def test_encrypted_audio_and_reply(self):
+    def test_encrypted_control_and_reply(self):
         try: import cryptography
         except ImportError: self.skipTest('Install bridge requirements to test AES-GCM')
         a,b = socket.socketpair()
@@ -642,93 +284,14 @@ class InteractionTests(unittest.TestCase):
             try:
                 with b:
                     wire=SecureChannel(b,'a'*32,True)
-                    self.assertEqual(wire.receive(), b'\x02private audio')
+                    self.assertEqual(wire.receive(), b'\x01private control')
                     wire.send(b'\x01reply')
             except BaseException as error: errors.append(error)
         t=threading.Thread(target=server);t.start()
         with a:
             wire=SecureChannel(a,'a'*32)
-            wire.send(b'\x02private audio');self.assertEqual(wire.receive(),b'\x01reply')
+            wire.send(b'\x01private control');self.assertEqual(wire.receive(),b'\x01reply')
         t.join(2); self.assertFalse(t.is_alive()); self.assertEqual(errors,[])
-    def test_full_voice_flow_uses_encrypted_transport_and_fake_desktop(self):
-        try: import cryptography
-        except ImportError: self.skipTest('Bridge requires cryptography')
-        from interaction import InteractionServer
-        server = InteractionServer.__new__(InteractionServer)
-        server.key, server.desktop = 'a'*32, self.desktop
-        server.broker, server.renderer = self.broker, Renderer()
-        server.active, server.target = threading.Lock(), None
-        server.selection = SelectionMemory()
-        server.transcribe = lambda pcm: 'reviewed voice'
-        a,b = socket.socketpair()
-        t=threading.Thread(target=server.handle,args=(b,));t.start()
-        with a:
-            wire=SecureChannel(a,'a'*32)
-            import json
-            def request(cmd, token=''):
-                wire.send(b'\x01'+json.dumps({'cmd':cmd,'token':token}).encode())
-                reply=wire.receive()
-                self.assertEqual(len(reply),17 + PIXELS)
-                return reply[0],reply[1:17].hex()
-            mode,token=request('sync');self.assertEqual(mode,7)
-            mode,token=request('sessions');self.assertEqual(mode,1)
-            self.assertEqual(server.target, 'one')
-            mode,token=request('back',token);self.assertEqual(mode,7)
-            mode,token=request('down',token)
-            mode,token=request('ok',token);self.assertEqual(mode,1)
-            mode,token=request('record',token);self.assertEqual(mode,5)
-            wire.send(b'\x02'+bytes(1024))
-            mode,token=request('stop',token);self.assertEqual(mode,1)
-            old=token
-            mode,token=request('ok',token);self.assertEqual(mode,1)
-            request('ok',old)
-        t.join(2);self.assertFalse(t.is_alive())
-        self.assertEqual(self.desktop.sent,[('two','reviewed voice')])
-        # A fresh authenticated connection restores the choice on its first wake.
-        a,b = socket.socketpair()
-        t=threading.Thread(target=server.handle,args=(b,));t.start()
-        with a:
-            wire=SecureChannel(a,'a'*32)
-            mode,token=request('sessions');self.assertEqual(mode,1)
-            self.assertEqual(server.target, 'two')
-            self.assertEqual(self.desktop.sent,[('two','reviewed voice')])
-        t.join(2);self.assertFalse(t.is_alive())
-
-    def test_new_chat_voice_and_single_confirm_use_existing_encrypted_protocol(self):
-        try:
-            import cryptography
-        except ImportError:
-            self.skipTest('Bridge requires cryptography')
-        import json
-        from interaction import InteractionServer, PIXELS
-        server = InteractionServer.__new__(InteractionServer)
-        server.key, server.desktop = 'a'*32, self.desktop
-        server.broker, server.renderer = self.broker, Renderer()
-        server.active, server.target = threading.Lock(), None
-        server.selection = SelectionMemory()
-        server.transcribe = lambda pcm: 'first voice'
-        a,b = socket.socketpair()
-        worker = threading.Thread(target=server.handle,args=(b,)); worker.start()
-        with a:
-            wire = SecureChannel(a,'a'*32)
-            def request(command, token=''):
-                wire.send(b'\x01'+json.dumps({'cmd':command,'token':token}).encode())
-                reply = wire.receive()
-                self.assertEqual(len(reply),17+PIXELS)
-                return reply[0],reply[1:17].hex()
-            mode,token = request('sync'); self.assertEqual(mode,7)
-            mode,token = request('new',token); self.assertEqual(mode,1)
-            self.assertIsNone(server.target)
-            mode,token = request('record',token); self.assertEqual(mode,5)
-            wire.send(b'\x02'+bytes(1024))
-            mode,token = request('stop',token); self.assertEqual(mode,2)
-            old = token
-            mode,token = request('ok',token); self.assertEqual(mode,8)
-            mode,token = request('ok',old); self.assertEqual(mode,8)
-        worker.join(2); self.assertFalse(worker.is_alive())
-        self.assertEqual(self.desktop.new_sent,[('Alpha','first voice')])
-        self.assertEqual(self.desktop.sent,[])
-        self.assertEqual(self.desktop.staged,[])
 
     def test_wrong_pairing_key_rejected(self):
         try: import cryptography
@@ -760,7 +323,7 @@ class InteractionTests(unittest.TestCase):
         t.join(2);self.assertFalse(t.is_alive())
         self.assertEqual(len(errors),1)
         self.assertIsInstance(errors[0],ValueError)
-        self.assertEqual(str(errors[0]),'Record authentication failed')
+        self.assertEqual(str(errors[0]),'数据包认证失败')
 
     def test_reconnect_uses_fresh_keys_and_rejects_previous_record(self):
         try: import cryptography
@@ -804,27 +367,6 @@ class RendererTests(unittest.TestCase):
         height = int(re.search(r'#define PET_CONTROL_HEIGHT (\d+)', source)[1])
         self.assertEqual((WIDTH, HEIGHT), (width, height))
         self.assertEqual(PIXELS, width * height // 8)
-
-    def test_new_chat_copy_and_long_project_fit_recording_panel(self):
-        try:
-            from interaction import Renderer as ActualRenderer
-            renderer = ActualRenderer()
-        except (ImportError, OSError):
-            self.skipTest('Local CJK renderer unavailable')
-        from PIL import Image, ImageDraw
-        desktop = Desktop()
-        desktop.projects = lambda: [{'id':'p','name':'中文项目名称与两层会话导航测试 '*4}]
-        desktop.sessions = lambda: []
-        review = Review(desktop, Broker(), renderer); review.sync()
-        review.action('new', review.token)
-        frame = review.screen()
-        self.assertEqual(frame[0], 1)
-        content = next(text for (text, _, _) in renderer.cache if 'Hold OK to record.' in text)
-        canvas = ImageDraw.Draw(Image.new('1',(216,144)))
-        bounds = canvas.multiline_textbbox((4,0),content,font=renderer.font,spacing=2)
-        self.assertLessEqual(bounds[2], 216)
-        self.assertLessEqual(bounds[3], 144)
-        self.assertIsNone(review.target)
 
     def test_list_windows_cover_small_lists_and_every_selection(self):
         desktop = Desktop()
@@ -960,7 +502,7 @@ class RendererTests(unittest.TestCase):
                     if count > 2:
                         self.assertTrue(lines[2].endswith('…'))
                     if count > 4:
-                        self.assertEqual(lines[4], 'Title: view on PC' if mode == 1 else 'Project: view on PC')
+                        self.assertEqual(lines[4], '请在电脑上查看会话标题' if mode == 1 else '请在电脑上查看项目')
                     pixels = Image.frombytes('1', (WIDTH, HEIGHT), frame[17:])
                     highlighted = [y for y in range(HEIGHT) if pixels.getpixel((0, y))]
                     self.assertTrue(highlighted)
@@ -1007,188 +549,20 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(len(renderer.bitmap('\u4e2d\u6587')), PIXELS)
         with self.assertRaises(UnsupportedText): renderer.pages('\U0010ffff')
         review = Review(Desktop(), Broker(), renderer)
-        review.sync();review.action('ok',review.token);review.change(2, '\U0010ffff')
-        self.assertEqual(review.mode, 2)
-        self.assertNotIn('\U0010ffff', ''.join(review.pages))
+        review.sync();review.action('ok',review.token)
         pending = review.broker.add({'session_id':review.target,'tool_name':'\U0010ffff'})
         review.change(3, pending['text'], pending['id'])
         self.assertEqual(review.mode,4)
         review.action('cancel',review.token)
         self.assertEqual(pending['answer'],'deny')
 
-class TranscriberTests(unittest.TestCase):
-    def transcribe(self, raw, script='simplified'):
-        try:
-            import opencc
-        except ImportError:self.skipTest('Install bridge requirements for Chinese normalization')
-        from interaction import Transcriber
-        with tempfile.TemporaryDirectory() as directory:
-            model=Path(directory)/'model.bin';model.write_bytes(b'model')
-            outputs=[]
-            def whisper(args, **kwargs):
-                self.assertEqual(args[args.index('-l')+1],'auto')
-                out=Path(args[args.index('-of')+1]).with_suffix('.txt')
-                out.write_text(raw,encoding='utf-8');outputs.append(out)
-            with patch('interaction.subprocess.run',side_effect=whisper):
-                text=Transcriber(model,chinese_script=script,backend='cli')(bytes(16000))
-            self.assertTrue(all(not p.exists() for p in outputs))
-            return text
-
-    def test_mixed_script_normalizes_to_simplified_preserving_english(self):
-        self.assertEqual(self.transcribe('現在選擇会話，請在後面繼續输入。Codex OK /tmp/test.py --foo=1\nSecond line.'),
-                         '现在选择会话，请在后面继续输入。Codex OK /tmp/test.py --foo=1\nSecond line.')
-
-    def test_only_voice_is_converted_and_accumulated(self):
-        desktop=Desktop();desktop.drafts['one']='原有繁體草稿。'
-        review=Review(desktop,Broker(),Renderer());review.sync();review.action('ok',review.token)
-        review.action('record',review.token)
-        review.transcript(self.transcribe('繼續輸入。'))
-        review.action('record',review.token)
-        review.transcript(self.transcribe('現在又變成了繁體中文。'))
-        self.assertEqual(desktop.drafts['one'], '继续输入。现在又变成了繁体中文。')
-        self.assertEqual(review.voice_text, desktop.drafts['one'])
-        self.assertEqual(desktop.sent,[])
-
-    def test_traditional_and_keep_are_explicit_options(self):
-        self.assertEqual(self.transcribe('现在选择会话。', 'traditional'),'現在選擇會話。')
-        raw='現在选择会話。'
-        self.assertEqual(self.transcribe(raw,'keep'),raw)
-
-    def test_sentence_boundaries_on_consecutive_mixed_language_segments(self):
-        desktop=Desktop();desktop.drafts['one']='已有繁體文字。'
-        review=Review(desktop,Broker(),Renderer());review.sync();review.action('ok',review.token)
-        for raw in ('第一句使用 Codex', 'Next sentence', '這是第三句？'):
-            review.action('record',review.token)
-            review.transcript(self.transcribe(raw))
-        self.assertEqual(desktop.drafts['one'], '第一句使用 Codex。Next sentence.这是第三句？')
-        self.assertEqual(review.voice_text, desktop.drafts['one'])
-        self.assertEqual(desktop.sent,[])
-
-    def test_terminators_quotes_empty_and_trailing_commas(self):
-        from speech import finish_sentence
-        cases={'':'', '  ':'', 'Hello':'Hello.', '中文，':'中文。', 'Hello!':'Hello!',
-               '真的吗？':'真的吗？', '「完成。」':'「完成。」', '"Done."':'"Done."',
-               '继续…':'继续…', '段落一\n段落二':'段落一\n段落二。'}
-        for raw,expected in cases.items():
-            with self.subTest(raw=raw):self.assertEqual(finish_sentence(raw),expected)
-
-class WhisperWorkerTests(unittest.TestCase):
-    def setUp(self):
-        # Processes and HTTP are mocked here; port reservation should also be
-        # independent of host network permissions.
-        self.reservation = self.enterContext(patch('speech.socket.socket')).return_value
-        self.reservation.getsockname.return_value = ('127.0.0.1', 1234)
-
-    def test_reuses_owned_model_and_keeps_audio_on_loopback(self):
-        from speech import WhisperWorker
-        from unittest.mock import MagicMock
-        process=MagicMock();process.poll.return_value=None
-        health=MagicMock();health.status=200;health.read.return_value=b'{"status":"ok"}'
-        result=MagicMock();result.status=200;result.read.return_value=b'{"text":"Codex test"}'
-        connection=MagicMock();connection.getresponse.side_effect=[health,result,result]
-        with patch('speech.subprocess.Popen',return_value=process) as popen, \
-             patch('speech.http.client.HTTPConnection',return_value=connection) as http:
-            worker=WhisperWorker('/tmp/test-model.bin','/usr/bin/whisper-server')
-            try:
-                worker.start();directory=Path(worker.directory.name)
-                self.assertEqual(worker(bytes(16000)),'Codex test')
-                self.assertEqual(worker(bytes(32000)),'Codex test')
-                self.assertEqual(popen.call_count,1)
-                self.reservation.bind.assert_called_once_with(('127.0.0.1', 0))
-                args=popen.call_args.args[0]
-                self.assertEqual(args[args.index('--host')+1],'127.0.0.1')
-                self.assertEqual(args[args.index('-mc')+1],'0')
-                self.assertEqual(args[args.index('--public')+1],str(directory))
-                self.assertEqual(popen.call_args.kwargs['stdout'],__import__('subprocess').DEVNULL)
-                for call in http.call_args_list:self.assertEqual(call.args[0],'127.0.0.1')
-                posts=[c for c in connection.request.call_args_list if c.args[0]=='POST']
-                self.assertEqual(len(posts),2)
-                body=posts[0].args[2]
-                self.assertIn(b'name="language"\r\n\r\nauto\r\n',body)
-                self.assertIn(b'name="response_format"\r\n\r\njson\r\n',body)
-                self.assertIn(b'RIFF',body)
-            finally:worker.close()
-            process.terminate.assert_called_once();process.wait.assert_called_once_with(timeout=3)
-            self.assertFalse(directory.exists())
-
-    def test_failed_inference_stops_worker_and_rejects_response(self):
-        from speech import WhisperWorker
-        from unittest.mock import MagicMock
-        for status,data in ((500,b'{}'),(200,b'x'*65537),(200,b'{"text":null}'),(200,b'[]')):
-            with self.subTest(status=status,size=len(data)):
-                worker=WhisperWorker('/tmp/model.bin','whisper-server')
-                worker.process=MagicMock();worker.process.poll.return_value=None
-                worker.port=1234
-                response=MagicMock();response.status=status;response.read.return_value=data
-                connection=MagicMock();connection.getresponse.return_value=response
-                process=worker.process
-                with patch('speech.http.client.HTTPConnection',return_value=connection):
-                    with self.assertRaises(ValueError):worker(bytes(16000))
-                response.read.assert_called_once_with(65537)
-                process.terminate.assert_called_once()
-                self.assertIsNone(worker.process)
-
-    def test_startup_failure_cleans_child_and_private_directory(self):
-        from speech import WhisperWorker
-        from unittest.mock import MagicMock
-        process=MagicMock();process.poll.return_value=1
-        worker=WhisperWorker('/tmp/model.bin','whisper-server')
-        with patch('speech.subprocess.Popen',return_value=process) as popen:
-            with self.assertRaises(OSError):worker.start()
-        self.assertFalse(Path(popen.call_args.kwargs['cwd']).exists())
-        self.assertIsNone(worker.process)
-
-    def test_invalid_audio_never_starts_worker(self):
-        from speech import WhisperWorker
-        worker=WhisperWorker('/tmp/model.bin','whisper-server')
-        with patch('speech.subprocess.Popen') as popen:
-            for pcm in (bytes(16001),bytes(960002),bytes(4)):
-                with self.assertRaises(ValueError):worker(pcm)
-            popen.assert_not_called()
-
-    def test_startup_timeout_forces_hung_child_to_stop(self):
-        from speech import WhisperWorker
-        from unittest.mock import MagicMock
-        import subprocess
-        process=MagicMock();process.poll.return_value=None
-        process.wait.side_effect=[subprocess.TimeoutExpired('whisper-server',3),None]
-        worker=WhisperWorker('/tmp/model.bin','whisper-server')
-        with patch('speech.subprocess.Popen',return_value=process), \
-             patch('speech.time.monotonic',side_effect=[0,26]):
-            with self.assertRaises(OSError):worker.start()
-        process.terminate.assert_called_once();process.kill.assert_called_once()
-        self.assertIsNone(worker.directory)
-
-    def test_next_recording_restarts_worker_after_inference_failure(self):
-        from speech import WhisperWorker
-        from unittest.mock import MagicMock
-        process=MagicMock();process.poll.return_value=None
-        health=MagicMock();health.status=200;health.read.return_value=b'{"status":"ok"}'
-        failure=MagicMock();failure.status=500;failure.read.return_value=b'{}'
-        result=MagicMock();result.status=200;result.read.return_value=b'{"text":"second recording"}'
-        connection=MagicMock();connection.getresponse.side_effect=[health,failure,health,result]
-        worker=WhisperWorker('/tmp/model.bin','whisper-server')
-        with patch('speech.subprocess.Popen',return_value=process) as popen, \
-             patch('speech.http.client.HTTPConnection',return_value=connection):
-            try:
-                with self.assertRaises(ValueError):worker(bytes(16000))
-                self.assertEqual(worker(bytes(16000)),'second recording')
-                self.assertEqual(popen.call_count,2)
-            finally:worker.close()
-
-    def test_restart_time_shares_the_inference_timeout_budget(self):
-        from speech import WhisperWorker
-        from unittest.mock import MagicMock
-        worker=WhisperWorker('/tmp/model.bin','whisper-server');worker.port=1234
-        response=MagicMock();response.status=200;response.read.return_value=b'{"text":"hello"}'
-        connection=MagicMock();connection.getresponse.return_value=response
-        with patch.object(worker,'start'),patch('speech.time.monotonic',side_effect=[0,10]), \
-             patch('speech.http.client.HTTPConnection',return_value=connection) as http:
-            self.assertEqual(worker(bytes(16000)),'hello')
-        http.assert_called_once_with('127.0.0.1',1234,timeout=55)
-
 class DesktopReconnectTests(unittest.TestCase):
     def setUp(self):
+        from interaction import Desktop as ActualDesktop
+        native_action = ActualDesktop.composer_action
+        self.native_press = lambda desktop, thread: native_action(desktop, thread, 'send')
+        self.press = self.enterContext(patch.object(ActualDesktop, 'composer_action'))
+        self.enterContext(patch('interaction.sys.platform', 'darwin'))
         self.enterContext(patch('interaction.time.sleep'))
 
     def write_draft(self, directory, text):
@@ -1198,239 +572,181 @@ class DesktopReconnectTests(unittest.TestCase):
             'local:other': {'prompt': 'other draft', 'pullRequestChecks': []}}}}
         (Path(directory) / '.codex-global-state.json').write_text(json.dumps(state))
 
-    def test_stage_fills_voice_once_and_waits_for_selected_pc_draft(self):
+    def test_confirm_uses_live_ui_without_reading_debounced_draft_or_owner(self):
         from interaction import Desktop as ActualDesktop
-        from urllib.parse import urlparse, parse_qs
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            self.write_draft(directory, 'existing PC text')
-            def fill(*args, **kwargs):
-                self.write_draft(directory, 'voice & +\nnext')
-            with patch('interaction.sys.platform', 'darwin'), \
-                    patch.object(desktop, 'owner') as owner, \
-                    patch.object(desktop, 'request') as request, \
-                    patch('interaction.subprocess.run', side_effect=fill) as launch:
-                desktop.stage('one', 'voice & +\nnext')
-                launch.assert_called_once(); owner.assert_not_called(); request.assert_not_called()
-                route = urlparse(launch.call_args.args[0][-1])
-                self.assertEqual((route.scheme, route.netloc, route.path), ('codex', 'threads', '/one'))
-                self.assertEqual(parse_qs(route.query), {'prompt': ['voice & +\nnext']})
-                self.assertEqual(launch.call_args.kwargs['timeout'], 5)
+        desktop = ActualDesktop()
+        with patch.object(desktop, 'project_state', side_effect=AssertionError('must not serialize UI input')), \
+                patch.object(desktop, 'activity_snapshot') as owner, patch.object(desktop, '_ipc_socket') as request, \
+                patch('interaction.time.sleep') as sleep:
+            self.assertTrue(desktop.send('one'))
+        self.press.assert_called_once_with('one', 'send')
+        owner.assert_not_called(); request.assert_not_called(); sleep.assert_not_called()
 
-    def test_delayed_fill_returns_to_list_and_later_sends_current_pc_edits(self):
+    def test_confirm_without_voice_consumes_token_and_presses_once(self):
         from interaction import Desktop as ActualDesktop
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            self.write_draft(directory, 'old PC text')
-            with patch('interaction.sys.platform', 'darwin'), \
-                    patch('interaction.subprocess.run') as launch, \
-                    patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
-                    patch.object(desktop, 'projects', return_value=Desktop().projects()):
-                review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
-                review.action('record', review.token)
-                with patch('interaction.time.monotonic', side_effect=[0, 3, 4]):
-                    review.transcript('new voice')
-                self.assertEqual((review.mode, review.text), (1, ''))
-                self.assertEqual(review.voice_text, 'new voice')
-            launch.assert_called_once()
-            self.assertEqual(desktop.draft('one'), 'old PC text')
-            self.assertIn('one', desktop._pending_fills)
-            self.write_draft(directory, 'edited voice on PC')
-            with patch.object(desktop, 'owner', return_value='owner'), patch.object(desktop, 'request') as request:
-                self.assertTrue(desktop.send_draft('one'))
-                self.assertEqual(request.call_args.args[1]['turnStart']['request']['input'][0]['text'],
-                                 'edited voice on PC')
-            self.assertNotIn('one', desktop._pending_fills)
+        desktop = ActualDesktop()
+        with patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
+                patch.object(desktop, 'projects', return_value=Desktop().projects()), \
+                patch.object(desktop, '_ipc_socket') as request:
+            review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
+            token = review.token
+            self.assertTrue(review.action('ok', token))
+            self.assertFalse(review.action('ok', token))
+        request.assert_not_called()
+        self.press.assert_called_once_with('one', 'send')
 
-    def test_unacknowledged_fill_cannot_send_the_preceding_pc_input(self):
-        from interaction import Desktop as ActualDesktop
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            self.write_draft(directory, 'old PC text')
-            with patch('interaction.sys.platform', 'darwin'), patch('interaction.subprocess.run'), \
-                    patch('interaction.time.monotonic', side_effect=[0, 3]):
-                self.assertFalse(desktop.stage('one', 'new voice'))
-            with patch.object(desktop, 'owner') as owner, patch.object(desktop, 'request') as request, \
-                    patch('interaction.time.monotonic', side_effect=[0, 3]), self.assertRaises(TimeoutError):
-                desktop.send_draft('one')
-            owner.assert_not_called(); request.assert_not_called()
-
-    def test_pending_fill_survives_a_missing_draft_without_resending_cached_voice(self):
-        from interaction import Desktop as ActualDesktop
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            self.write_draft(directory, 'old PC text')
-            with patch('interaction.sys.platform', 'darwin'), patch('interaction.subprocess.run'), \
-                    patch('interaction.time.monotonic', side_effect=[0, 3]):
-                self.assertFalse(desktop.stage('one', 'new voice'))
-            self.write_draft(directory, '')
-            with patch('interaction.time.monotonic', side_effect=[0, 3]):
-                self.assertFalse(desktop.wait_for_fill('one'))
-            self.assertIn('one', desktop._pending_fills)
-            with patch.object(desktop, 'owner') as owner, patch.object(desktop, 'request') as request:
-                self.assertFalse(desktop.send_draft('one'))
-            owner.assert_not_called(); request.assert_not_called()
-
-    def test_confirm_waits_for_a_recent_pc_edit_before_reading_the_draft(self):
-        from interaction import Desktop as ActualDesktop
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            self.write_draft(directory, 'before PC edit')
-            with patch('interaction.time.sleep', side_effect=lambda seconds: self.write_draft(directory, 'after PC edit')) as sleep, \
-                    patch.object(desktop, 'owner', return_value='owner'), patch.object(desktop, 'request') as request:
-                self.assertTrue(desktop.send_draft('one'))
-            sleep.assert_called_once_with(0.8)
-            self.assertEqual(request.call_args.args[1]['turnStart']['request']['input'][0]['text'], 'after PC edit')
-
-    def test_filling_error_returns_dismissible_error_without_ipc_or_retry(self):
-        from interaction import Desktop as ActualDesktop
+    def test_press_errors_consume_confirmation_without_retry_or_claiming_sent(self):
         import subprocess
-        for error in (OSError(), subprocess.TimeoutExpired('open', 5), subprocess.CalledProcessError(1, 'open')):
-            with self.subTest(error=type(error)), tempfile.TemporaryDirectory() as directory:
-                desktop = ActualDesktop(directory)
+        from interaction import Desktop as ActualDesktop, ComposerActionError
+        errors = (ComposerActionError('press-not-acknowledged'), ComposerActionError('helper-failed'),
+                  subprocess.TimeoutExpired('composer-action', 6), OSError('helper unavailable'))
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                desktop = ActualDesktop()
+                self.press.reset_mock(); self.press.side_effect = error
                 with patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
                         patch.object(desktop, 'projects', return_value=Desktop().projects()), \
-                        patch.object(desktop, 'request') as request, \
-                        patch('interaction.sys.platform', 'darwin'), \
-                        patch('interaction.subprocess.run', side_effect=error) as launch:
+                        patch.object(desktop, '_ipc_socket') as request:
                     review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
-                    self.assertTrue(review.action('record', review.token)); review.transcript('voice')
+                    token = review.token
+                    review.action('ok', token)
                     self.assertEqual(review.mode, 4)
-                    self.assertNotIn('voice', review.text)
+                    self.assertIn('尚未确认发送结果', review.text)
+                    self.assertNotIn('消息已发送', review.text)
+                    self.assertFalse(review.action('ok', token))
                     review.sync(); review.screen()
-                    launch.assert_called_once(); request.assert_not_called()
-                    review.action('cancel', review.token)
-                    self.assertEqual(review.mode, 1)
+                self.press.assert_called_once_with('one', 'send'); request.assert_not_called()
 
-    def test_confirm_reads_latest_selected_pc_draft_without_recording(self):
+    def test_send_prepress_failures_show_actionable_cause_without_uncertain_send_warning(self):
+        from interaction import Desktop as ActualDesktop, ComposerActionError
+        reasons = {'chat-not-found': '未找到所选会话', 'chat-changed': '所选会话已变化',
+                   'composer-button-unavailable': '暂时无法发送', 'send-disabled': '发送按钮不可用',
+                   'send-input-required': '暂无可发送内容',
+                   'multiple-writable-editors': '发现多个输入框',
+                   'multiple-composer-buttons': '发现多个发送按钮',
+                   'accessibility-tree-limit': '无法读取 Codex 界面'}
+        for reason, message in reasons.items():
+            with self.subTest(reason=reason):
+                desktop = ActualDesktop()
+                self.press.reset_mock(); self.press.side_effect = ComposerActionError(reason)
+                with patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
+                        patch.object(desktop, 'projects', return_value=Desktop().projects()):
+                    review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
+                    token = review.token
+                    review.action('ok', token)
+                    self.assertEqual(review.mode, 4)
+                    self.assertIn(message, review.text)
+                    self.assertNotIn('尚未确认发送结果', review.text)
+                    self.assertNotIn('消息已发送', review.text)
+                    self.assertFalse(review.action('ok', token))
+                    review.sync(); review.screen()
+                self.press.assert_called_once_with('one', 'send')
+
+    def test_ui_submission_does_not_rewrite_or_clear_saved_drafts(self):
         from interaction import Desktop as ActualDesktop
         with tempfile.TemporaryDirectory() as directory:
             desktop = ActualDesktop(directory)
-            self.write_draft(directory, 'existing PC text')
-            with patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
-                    patch.object(desktop, 'projects', return_value=Desktop().projects()), \
-                    patch.object(desktop, 'owner', return_value='owner') as owner, \
-                    patch.object(desktop, 'request') as request:
-                review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
-                token = review.token
-                self.write_draft(directory, 'edited on PC')
-                self.assertTrue(review.action('ok', token))
-                self.assertFalse(review.action('ok', token))
-                owner.assert_called_once_with('one'); request.assert_called_once()
-                method, params, version, target = request.call_args.args
-                self.assertEqual((method, version, target), ('thread-follower-start-turn', 2, 'owner'))
-                self.assertEqual(params['conversationId'], 'one')
-                self.assertEqual(params['turnStart']['request']['input'][0]['text'], 'edited on PC')
+            self.write_draft(directory, 'current text')
+            state = Path(directory) / '.codex-global-state.json'
+            before = state.read_bytes()
+            self.assertTrue(desktop.send('one'))
+            self.assertEqual(state.read_bytes(), before)
 
-    def test_empty_pc_input_and_edit_during_owner_discovery_do_not_send(self):
+    def test_native_press_opens_exact_chat_without_prompt_and_reuses_compilation(self):
+        import json
+        import subprocess
+        from interaction import Desktop as ActualDesktop
+        from urllib.parse import urlparse
+        with tempfile.TemporaryDirectory() as directory:
+            desktop = ActualDesktop(directory)
+            with patch('interaction.subprocess.run') as launch:
+                self.native_press(desktop, 'one')
+            self.addCleanup(desktop._composer_helper_dir.cleanup)
+            self.assertEqual(launch.call_count, 3)
+            compile_args = launch.call_args_list[0].args[0]
+            self.assertEqual(compile_args[0], '/usr/bin/clang')
+            self.assertTrue(any(arg.endswith('/composer_action.m') for arg in compile_args))
+            route = urlparse(launch.call_args_list[1].args[0][-1])
+            self.assertEqual((route.scheme, route.netloc, route.path, route.query), ('codex', 'threads', '/one', ''))
+            args, options = launch.call_args.args[0], launch.call_args.kwargs
+            self.assertEqual(len(args), 1)
+            self.assertTrue(args[0].endswith('/composer-action'))
+            self.assertEqual(json.loads(options['input']), {'thread': 'one', 'action': 'send'})
+            self.assertEqual(options['stdout'], subprocess.DEVNULL)
+            self.assertEqual(options['stderr'], subprocess.PIPE)
+            self.assertTrue(options['check'])
+            with patch('interaction.subprocess.run') as launch:
+                self.native_press(desktop, 'two')
+            self.assertEqual(launch.call_count, 2)
+            self.assertEqual(json.loads(launch.call_args.kwargs['input']), {'thread': 'two', 'action': 'send'})
+
+    def test_navigation_failure_never_invokes_native_press(self):
+        import subprocess
         from interaction import Desktop as ActualDesktop
         with tempfile.TemporaryDirectory() as directory:
             desktop = ActualDesktop(directory)
-            with patch.object(desktop, 'request') as request, patch.object(desktop, 'owner') as owner:
-                self.write_draft(directory, '   ')
-                self.assertFalse(desktop.send_draft('one'))
-                owner.assert_not_called()
-                self.write_draft(directory, 'before')
-                owner.side_effect = lambda thread: self.write_draft(directory, 'after') or 'owner'
-                with self.assertRaises(ValueError): desktop.send_draft('one')
-                request.assert_not_called()
+            with patch('interaction.subprocess.run', side_effect=[None, subprocess.CalledProcessError(1, 'open')]) as run:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.native_press(desktop, 'one')
+            self.addCleanup(desktop._composer_helper_dir.cleanup)
+            self.assertEqual(run.call_count, 2)
 
-    def test_pc_rich_document_preserves_paragraphs_and_rejects_mentions(self):
+    def test_accessibility_denial_reports_permission_without_claiming_send(self):
+        from interaction import Desktop as ActualDesktop, ComposerActionError
+        desktop = ActualDesktop()
+        self.press.side_effect = ComposerActionError('accessibility-denied')
+        with patch.object(desktop, 'sessions', return_value=Desktop().sessions()), \
+                patch.object(desktop, 'projects', return_value=Desktop().projects()):
+            review = Review(desktop, Broker(), Renderer()); review.sync(); review.action('ok', review.token)
+            token = review.token
+            review.action('ok', token)
+            self.assertEqual(review.mode, 4)
+            self.assertIn('开启辅助功能权限', review.text)
+            self.assertNotIn('消息已发送', review.text)
+            self.assertFalse(review.action('ok', token))
+        self.press.assert_called_once_with('one', 'send')
+
+    def test_native_failures_log_only_reason_and_never_retry_press(self):
+        import subprocess
+        from interaction import Desktop as ActualDesktop, ComposerActionError
+        for code, reason in ((10, 'accessibility-denied'), (13, 'chat-not-found'),
+                             (22, 'composer-button-unavailable'), (28, 'send-disabled'),
+                             (29, 'send-input-required'),
+                             (19, 'press-not-acknowledged')):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                desktop = ActualDesktop(directory)
+                with patch('interaction.subprocess.run', side_effect=[None, None, subprocess.CalledProcessError(code, 'composer-action')]) as run, \
+                        patch('builtins.print') as output:
+                    with self.assertRaises(ComposerActionError) as result:
+                        self.native_press(desktop, 'one')
+                self.addCleanup(desktop._composer_helper_dir.cleanup)
+                self.assertEqual(result.exception.reason, reason)
+                output.assert_any_call('电脑端输入框操作结果：', __import__('messages').reason_text(reason), flush=True)
+                self.assertEqual(output.call_count, 2)
+                timing = output.call_args_list[1].args
+                self.assertEqual(timing[:2], ('电脑端输入框操作耗时：', '发送'))
+                self.assertEqual(timing[2::2], ('导航毫秒：', '目录查询毫秒：', '原生操作毫秒：'))
+                self.assertTrue(all(type(value) is int and value >= 0 for value in timing[3::2]))
+                self.assertEqual(run.call_count, 3)
+
+    def test_non_macos_cannot_press_or_fall_back_to_ipc(self):
         from interaction import Desktop as ActualDesktop
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            prompt = {'document': {'type': 'doc', 'content': [
-                {'type': 'paragraph', 'content': [{'type': 'text', 'text': '中文 ABC'},
-                                                 {'type': 'hardBreak'}, {'type': 'text', 'text': '123'}]},
-                {'type': 'paragraph', 'content': [{'type': 'text', 'text': 'next'}]}]},
-                      'plainTextMode': True}
-            self.write_draft(directory, prompt)
-            self.assertEqual(desktop.draft('one'), '中文 ABC\n123\nnext')
-            prompt['document']['content'][0]['content'].append({'type': 'mention', 'attrs': {'id': 'file'}})
-            self.write_draft(directory, prompt)
-            with self.assertRaises(ValueError): desktop.draft('one')
+        desktop = ActualDesktop()
+        with patch('interaction.sys.platform', 'linux'), patch.object(desktop, '_ipc_socket') as request:
+            with self.assertRaises(RuntimeError): self.native_press(desktop, 'one')
+        self.press.assert_not_called(); request.assert_not_called()
 
-    def test_pc_source_position_marks_acknowledge_fill_and_send_current_text(self):
-        from interaction import Desktop as ActualDesktop
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            def prompt(text):
-                return {'document': {'type': 'doc', 'attrs': {}, 'content': [
-                    {'type': 'paragraph', 'attrs': {'start': 0, 'end': 6}, 'content': [
-                        {'type': 'text', 'text': text, 'marks': [
-                            {'type': 'startend', 'attrs': {'start': 0, 'end': 6}}]}]}]},
-                        'plainTextMode': False}
-            desktop._pending_fills['one'] = ('voice input', '')
-            self.write_draft(directory, prompt('voice input'))
-            self.assertTrue(desktop.wait_for_fill('one'))
-            self.write_draft(directory, prompt('edited PC input'))
-            with patch.object(desktop, 'owner', return_value='owner'), \
-                    patch.object(desktop, 'request') as request:
-                self.assertTrue(desktop.send_draft('one'))
-            request.assert_called_once()
-            self.assertEqual(request.call_args.args[1]['turnStart']['request']['input'][0]['text'],
-                             'edited PC input')
-
-    def test_pc_source_positions_do_not_allow_formatting_or_malformed_marks(self):
-        from interaction import Desktop as ActualDesktop
-        with tempfile.TemporaryDirectory() as directory:
-            desktop = ActualDesktop(directory)
-            for marks in ([{'type': 'startend'}, {'type': 'bold'}],
-                          [{'type': 'link', 'attrs': {'href': 'https://example.com'}}],
-                          [None], ['startend'], {'type': 'startend'}, None):
-                with self.subTest(marks=marks), patch.object(desktop, 'request') as request:
-                    self.write_draft(directory, {'document': {'type': 'doc', 'content': [
-                        {'type': 'paragraph', 'content': [
-                            {'type': 'text', 'text': 'input', 'marks': marks}]}]}})
-                    with self.assertRaises(ValueError): desktop.send_draft('one')
-                    request.assert_not_called()
-
-    def test_malformed_selected_draft_does_not_send_or_crash_control_handler(self):
+    def test_ui_owns_rich_mentions_attachments_and_empty_input_validation(self):
         from interaction import Desktop as ActualDesktop
         malformed = (None, [], {'document': {'type': 'doc', 'content': None}},
-                     {'document': {'type': 'doc', 'content': [{'type': 'paragraph', 'content': None}]}},
-                     {'document': {'type': 'doc', 'content': ['invalid paragraph']}})
+                     {'document': {'type': 'doc', 'content': [{'type': 'mention'}]}}, '')
         with tempfile.TemporaryDirectory() as directory:
             desktop = ActualDesktop(directory)
-            with patch.object(desktop, 'request') as request:
-                for value in malformed:
-                    with self.subTest(value=value):
-                        self.write_draft(directory, value)
-                        with self.assertRaises(ValueError): desktop.send_draft('one')
-                request.assert_not_called()
-
-    def test_empty_or_oversized_voice_never_launches_input_filling(self):
-        from interaction import Desktop as ActualDesktop
-        desktop = ActualDesktop()
-        with patch('interaction.sys.platform', 'darwin'), patch('interaction.subprocess.run') as launch:
-            for text in ('', '   ', 'x' * 12001):
-                with self.subTest(size=len(text)), self.assertRaises(ValueError):
-                    desktop.stage('one', text)
-            launch.assert_not_called()
-
-    def test_new_chat_preparation_pins_migrated_project_without_creating_or_sending(self):
-        from interaction import Desktop as ActualDesktop, PROJECTLESS
-        desktop = ActualDesktop()
-        state = {'local-projects': {'legacy': {'name': 'Project'}},
-                 'app-server-project-id-by-legacy-project-id-by-host': {'local': {'legacy':'server'}}}
-        with patch.object(desktop, 'projects', return_value=[{'id':'server','name':'Project'}]), patch.object(
-                desktop, 'project_state', return_value=state), patch('interaction.sys.platform', 'darwin'), patch(
-                'interaction.cli_path', return_value='/codex') as cli, patch.object(
-                desktop, 'project_roots', return_value={'server':[tempfile.gettempdir()]}) as roots, patch(
-                'interaction.subprocess.Popen') as launch:
-            desktop.new_session('server')
-            roots.assert_called_once_with(state); cli.assert_called_once(); launch.assert_not_called()
-            with self.assertRaises(ValueError): desktop.new_session(PROJECTLESS)
-            with self.assertRaises(ValueError): desktop.new_session('missing')
-
-    def test_cli_owned_chat_cannot_be_opened_or_submitted_by_desktop(self):
-        from interaction import Desktop as ActualDesktop
-        desktop = ActualDesktop()
-        with patch.object(desktop.new_chats, 'owns', return_value=True), patch.object(
-                desktop, 'request') as request, patch('interaction.subprocess.run') as launch:
-            with self.assertRaises(RuntimeError): desktop.send('new', 'followup')
-            with self.assertRaises(RuntimeError): desktop.stage('new', 'followup')
-            request.assert_not_called(); launch.assert_not_called()
+            for value in malformed:
+                with self.subTest(value=value):
+                    self.write_draft(directory, value)
+                    self.assertTrue(desktop.send('one'))
+            self.assertEqual(self.press.call_count, len(malformed))
 
     def test_project_catalog_deduplicates_migration_and_preserves_equal_names(self):
         from interaction import Desktop as ActualDesktop
@@ -1457,7 +773,7 @@ class DesktopReconnectTests(unittest.TestCase):
                 db.executemany('INSERT INTO threads VALUES(?,\'First user prompt\',?,\'p\',\'/repo\',0,NULL,?)', [('closed','Old',2),('live','Current',1)])
                 db.commit()
             desktop=ActualDesktop(directory)
-            with patch.object(desktop,'owner',side_effect=EOFError('Connection closed')) as owner:
+            with patch.object(desktop,'activity_snapshot',side_effect=EOFError('连接已关闭')) as owner:
                 self.assertEqual(desktop._scan_sessions(),[
                     {'id':'closed','title':'Old','project':'Project name','project_id':'p'},
                     {'id':'live','title':'Current','project':'Project name','project_id':'p'}])
@@ -1480,16 +796,16 @@ class DesktopReconnectTests(unittest.TestCase):
                 'thread-titles':{'titles':{'nested':'Saved title'}},
                 'projectless-thread-ids':['loose']}))
             desktop=ActualDesktop(directory)
-            with patch.object(desktop,'owner',return_value='owner'):
+            with patch.object(desktop,'activity_snapshot',return_value='activity_snapshot'):
                 found={s['id']:s for s in desktop._scan_sessions()}
                 self.assertEqual(found['assigned']['project'],'Renamed project')
                 self.assertEqual(found['assigned']['project_id'],'p')
                 self.assertEqual(found['nested']['project'],'Nested project')
                 self.assertEqual(found['nested']['project_id'],'sub')
                 self.assertEqual(found['nested']['title'],'Saved title')
-                self.assertEqual(found['loose']['project'],'No project')
+                self.assertEqual(found['loose']['project'],'无项目')
                 self.assertEqual(found['loose']['project_id'],'__projectless__')
-                self.assertEqual(found['unnamed']['title'],'Untitled chat')
+                self.assertEqual(found['unnamed']['title'],'未命名会话')
 
     def test_project_lists_all_saved_chats_beyond_recent_80_with_host_migration(self):
         from interaction import Desktop as ActualDesktop
@@ -1514,7 +830,7 @@ class DesktopReconnectTests(unittest.TestCase):
                     'local:' + str(root.resolve()): {'legacy':'server'},
                     'local:/different/account': {'legacy':'wrong-server'}}}))
             desktop = ActualDesktop(directory)
-            with patch.object(desktop, 'owner', side_effect=TimeoutError()) as owner:
+            with patch.object(desktop, 'activity_snapshot', side_effect=TimeoutError()) as owner:
                 desktop._sessions = desktop._scan_sessions()
                 desktop._refreshed = time.monotonic()
                 self.assertEqual(len(desktop.sessions()), 92)
@@ -1541,18 +857,83 @@ class DesktopReconnectTests(unittest.TestCase):
         completed=threading.Event()
         def scan():
             completed.set()
-            raise EOFError('Connection closed')
+            raise EOFError('连接已关闭')
         with patch.object(desktop,'_scan_sessions',side_effect=scan):
             self.assertEqual(desktop.sessions(),[])
             self.assertTrue(completed.wait(1))
             deadline=time.monotonic()+1
             while desktop._refreshing and time.monotonic()<deadline: time.sleep(0.001)
             self.assertFalse(desktop._refreshing)
-        with desktop._lock: desktop._refreshed=0
+        with desktop._lock:
+            desktop._refreshed=0
+            desktop._refresh_attempted=0
         with patch.object(desktop,'_scan_sessions',return_value=[{'id':'new','title':'Restored'}]):
             desktop.sessions()
             deadline=time.monotonic()+1
             while desktop._refreshing and time.monotonic()<deadline: time.sleep(0.001)
             self.assertEqual(desktop.sessions(),[{'id':'new','title':'Restored'}])
+
+    def test_metadata_failure_keeps_titles_and_successful_empty_refresh_removes_them(self):
+        from interaction import Desktop as ActualDesktop
+        desktop = ActualDesktop()
+        saved = [{'id': 'one', 'title': 'Saved title'}]
+        desktop._sessions = list(saved)
+        with patch.object(desktop, '_scan_sessions', side_effect=sqlite3.OperationalError('busy')):
+            desktop.sessions()
+            deadline = time.monotonic() + 1
+            while desktop._refreshing and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertEqual(desktop.sessions(), saved)
+        desktop._refresh_attempted = 0
+        with patch.object(desktop, '_scan_sessions', return_value=[]):
+            desktop.sessions()
+            deadline = time.monotonic() + 1
+            while desktop._refreshing and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertEqual(desktop.sessions(), [])
+
+    def test_missing_identity_refreshes_fresh_cache_without_blocking_or_duplicate_worker(self):
+        from interaction import Desktop as ActualDesktop
+        desktop = ActualDesktop()
+        desktop._refreshed = time.monotonic()
+        entered, release = threading.Event(), threading.Event()
+        def scan():
+            entered.set()
+            release.wait(2)
+            return [{'id': 'new', 'title': 'New title'}]
+        import hashlib
+        required = [hashlib.sha256(b'new').hexdigest()[:32]]
+        with patch.object(desktop, '_scan_sessions', side_effect=scan) as read:
+            try:
+                self.assertEqual(desktop.sessions(required=required), [])
+                self.assertTrue(entered.wait(1))
+                for _ in range(5):
+                    self.assertEqual(desktop.sessions(required=required), [])
+                self.assertEqual(read.call_count, 1)
+            finally:
+                release.set()
+            deadline = time.monotonic() + 1
+            while desktop._refreshing and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertEqual(desktop.sessions(required=required), [{'id': 'new', 'title': 'New title'}])
+
+    def test_source_filter_and_missing_title_preserve_user_chat_without_internal_rows(self):
+        from interaction import Desktop as ActualDesktop
+        with tempfile.TemporaryDirectory() as directory:
+            with closing(sqlite3.connect(str(Path(directory) / 'state_5.sqlite'))) as db:
+                db.execute('CREATE TABLE threads(id TEXT,name TEXT,project_id TEXT,cwd TEXT,archived INTEGER,agent_path TEXT,updated_at INTEGER,source TEXT)')
+                db.execute('CREATE TABLE projects(id TEXT,name TEXT)')
+                db.executemany('INSERT INTO threads VALUES(?,?,NULL,NULL,0,NULL,1,?)', [
+                    ('one', None, 'vscode'), ('new', None, 'vscode'),
+                    ('guardian', 'Internal', '{"subagent":{"other":"guardian"}}'),
+                    ('child', 'Child', '{"subagent":{"thread_spawn":{"parent_thread_id":"one"}}}')])
+                db.commit()
+            desktop = ActualDesktop(directory)
+            desktop._sessions = [{'id': 'one', 'title': 'Last valid title'}]
+            found = {session['id']: session for session in desktop._scan_sessions()}
+            self.assertEqual(set(found), {'one', 'new'})
+            self.assertEqual(found['one']['title'], 'Last valid title')
+            self.assertEqual(found['new']['title'], '未命名会话')
+            self.assertEqual(set(desktop.activity_threads()), {'one', 'new'})
 
 if __name__ == '__main__': unittest.main()

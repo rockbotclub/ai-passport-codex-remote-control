@@ -1,9 +1,8 @@
 #include "pet_control.h"
 #include "pet_network.h"
 #include "pet_button_policy.h"
-_Static_assert(BSP_BTN_UP == 0 && BSP_BTN_DOWN == 1 && BSP_BTN_OK == 2, "Button mapping changed");
-_Static_assert(BSP_BTN_CLICK == 1 && BSP_BTN_LONG == 3 && BSP_BTN_RELEASE == 4, "Event mapping changed");
-#include "bsp_audio.h"
+_Static_assert(BSP_BTN_UP == 0 && BSP_BTN_DOWN == 1 && BSP_BTN_OK == 2, "按键映射已变化");
+_Static_assert(BSP_BTN_CLICK == 1 && BSP_BTN_LONG == 3 && BSP_BTN_RELEASE == 4, "按键事件映射已变化");
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "mbedtls/gcm.h"
@@ -20,14 +19,14 @@ _Static_assert(BSP_BTN_CLICK == 1 && BSP_BTN_LONG == 3 && BSP_BTN_RELEASE == 4, 
 
 #define CONTROL_PORT 19285
 #define MAX_FRAME 6144
-_Static_assert(17 + PET_CONTROL_PIXELS + 16 <= MAX_FRAME, "Control bitmap exceeds encrypted record limit");
+_Static_assert(17 + PET_CONTROL_PIXELS + 16 <= MAX_FRAME, "控制位图超出加密数据包大小限制");
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static pet_control_view_t s_view;
-typedef struct { const char *command; uint8_t token[16]; } action_t;
+typedef struct { const char *command; uint8_t token[16], pending_mode; } action_t;
 static QueueHandle_t s_actions;
-static atomic_bool s_held, s_recording, s_physical_ok;
+static atomic_bool s_held, s_dictating, s_physical_ok;
 static bool s_swallow_click;
-static unsigned char s_cipher[MAX_FRAME], s_plain[MAX_FRAME], s_tx[1100];
+static unsigned char s_cipher[MAX_FRAME], s_plain[MAX_FRAME], s_tx[256];
 static unsigned char s_control_plain[17 + PET_CONTROL_PIXELS];
 static mbedtls_gcm_context s_encrypt, s_decrypt;
 static uint64_t s_sent, s_received;
@@ -115,7 +114,7 @@ static bool secure_receive(int fd, size_t expected) {
     return true;
 }
 static bool receive_view(int fd) {
-    if (!secure_receive(fd, sizeof(s_control_plain)) || s_plain[0] < 1 || s_plain[0] > 8 || s_plain[0] == 6)
+    if (!secure_receive(fd, sizeof(s_control_plain)) || !pet_control_mode_valid(s_plain[0]))
         return false;
     memcpy(s_control_plain, s_plain, sizeof(s_control_plain));
     if (!secure_receive(fd, PET_HOME_FRAME_BYTES)) return false;
@@ -135,37 +134,23 @@ static bool command(int fd, const char *name, const uint8_t token[16]) {
     char hex[33];
     for (unsigned i = 0; i < 16; ++i) snprintf(hex+i*2, 3, "%02x", token[i]);
     s_tx[0] = 1;
-    int n = snprintf((char *)s_tx+1, sizeof(s_tx)-1, "{\"cmd\":\"%s\",\"token\":\"%s\",\"home\":true}", name, hex);
-    return n > 0 && secure_send(fd, s_tx, (size_t)n+1) && receive_view(fd);
+    int n = snprintf((char *)s_tx+1, sizeof(s_tx)-1, "{\"cmd\":\"%s\",\"token\":\"%s\",\"home\":true,\"pc_dictation\":true}", name, hex);
+    return n > 0 && (size_t)n < sizeof(s_tx)-1 && secure_send(fd, s_tx, (size_t)n+1) && receive_view(fd);
 }
-static bool record(int fd) {
+static bool wait_dictation_release(int fd) {
     uint8_t token[16];
     portENTER_CRITICAL(&s_lock);
     uint8_t mode = s_view.mode;
     memcpy(token, s_view.token, sizeof(token));
     portEXIT_CRITICAL(&s_lock);
-    if (mode != 5) return true;
-    if (bsp_audio_init() != ESP_OK || bsp_audio_wake() != ESP_OK ||
-        bsp_audio_set_format(16000, 16, 1) != ESP_OK) return false;
-    s_recording = true;
+    if (mode != 10) return true;
+    s_dictating = true;
     uint64_t end = now_ms() + 30000;
-    while (s_held && now_ms() < end) {
-        s_tx[0] = 2;
-        if (bsp_audio_read(s_tx+1, 1024) != ESP_OK) {
-            s_recording = false; return false;
-        }
-        // A release observed during the blocking ADC/I2S read ends capture immediately.
-        if (!s_held) break;
-        if (!secure_send(fd, s_tx, 1025)) {
-            s_recording = false; return false;
-        }
-    }
+    while (s_held && now_ms() < end) vTaskDelay(pdMS_TO_TICKS(20));
     s_held = false;
-    s_recording = false;
+    s_dictating = false;
     mode_set(6);
-    bool result = command(fd, "stop", token);
-    (void)bsp_audio_sleep();
-    return result;
+    return command(fd, "stop", token);
 }
 static void worker(void *unused) {
     (void)unused;
@@ -187,13 +172,17 @@ static void worker(void *unused) {
         while (connected) {
             action_t action;
             if (xQueueReceive(s_actions, &action, pdMS_TO_TICKS(30)) == pdTRUE) {
-                // Only this connection may own a recording. Release is atomic, so
-                // queue saturation cannot leave the microphone running indefinitely.
+                // Only this connection may own a dictation. Release is atomic, so
+                // queue saturation cannot leave PC dictation running indefinitely.
                 if (!strcmp(action.command, "record") && !s_held) continue;
-                // Explicit voice submission and project opening use desktop IPC/routes.
+                // Explicit UI actions may navigate or wait for desktop dictation.
                 // Normal one-second syncs keep their short disconnect timeout.
-                timeout.tv_sec = !strcmp(action.command, "ok") || !strcmp(action.command, "new") ? 14 : 4;
+                timeout.tv_sec = !strcmp(action.command, "ok") || !strcmp(action.command, "new") ||
+                                 !strcmp(action.command, "record") ? PET_CONTROL_ACTION_TIMEOUT_MS / 1000 : 4;
                 setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+                // Keep the pending state visible while the native UI action runs.
+                // The authenticated reply, or transport failure, replaces it.
+                if (action.pending_mode) mode_set(action.pending_mode);
                 connected = command(fd, action.command, action.token);
                 if (connected && !strcmp(action.command, "sessions")) {
                     portENTER_CRITICAL(&s_lock);
@@ -201,10 +190,10 @@ static void worker(void *unused) {
                     portEXIT_CRITICAL(&s_lock);
                 }
                 if (connected && !strcmp(action.command, "record")) {
-                    // Whisper (65 s) + desktop input filling (5 s) + margin.
-                    timeout.tv_sec = 82;
+                    // Native Stop/Cancel action (8 s) plus a bounded transport margin.
+                    timeout.tv_sec = 16;
                     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-                    connected = record(fd);
+                    connected = wait_dictation_release(fd);
                 }
                 timeout.tv_sec = 4;
                 setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
@@ -215,8 +204,7 @@ static void worker(void *unused) {
                 next_sync = now_ms() + 800;
             }
         }
-        s_held = false; s_recording = false;
-        (void)bsp_audio_sleep();
+        s_held = false; s_dictating = false;
         close(fd); mode_set(0);
         vTaskDelay(pdMS_TO_TICKS(1500));
     }
@@ -242,9 +230,10 @@ bool pet_control_input(bsp_btn_t btn, bsp_btn_ev_t event, const pet_control_view
     if (!s_actions) return false;
     pet_action_t choice = pet_button_action(view->mode, now_ms() - view->received_ms <= 2500, btn, event);
     if (choice == PET_ACTION_NONE || choice == PET_ACTION_SETUP || choice == PET_ACTION_PLAY) return false;
-    if (choice == PET_ACTION_CONSUME || choice == PET_ACTION_HOME || s_recording) return true;
-    action_t action = {0}; memcpy(action.token, view->token, 16);
-    if (choice == PET_ACTION_RECORD) {
+    if (choice == PET_ACTION_CONSUME || choice == PET_ACTION_HOME || s_dictating) return true;
+    action_t action = {.pending_mode = pet_control_pending_mode(view->mode, choice)};
+    memcpy(action.token, view->token, 16);
+    if (choice == PET_ACTION_DICTATE) {
         s_swallow_click = true;
         action.command = "record";
         s_held = s_physical_ok;
@@ -254,6 +243,6 @@ bool pet_control_input(bsp_btn_t btn, bsp_btn_ev_t event, const pet_control_view
                          choice == PET_ACTION_NEW ? "new" : "cancel";
     }
     bool queued = xQueueSend(s_actions, &action, 0) == pdTRUE;
-    if (!queued && choice == PET_ACTION_RECORD) s_held = false;
+    if (!queued && choice == PET_ACTION_DICTATE) s_held = false;
     return true;
 }

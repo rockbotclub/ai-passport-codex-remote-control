@@ -16,7 +16,7 @@ static bool number(const char **cursor, unsigned *value, char separator) {
 }
 
 static bool parse(const char *line, pet_state_t *state, uint64_t now_ms) {
-    static const char *names[] = {"offline", "idle", "working", "waiting", "done", "error"};
+    static const char *names[] = {"offline", "idle", "working", "waiting", "done", "error", "syncing"};
     if (strncmp(line, "CP1 ", 4)) return false;
     const char *p = line + 4;
     size_t status;
@@ -29,7 +29,7 @@ static bool parse(const char *line, pet_state_t *state, uint64_t now_ms) {
     if (!number(&p, &active, ' ') || !number(&p, &waiting, '\0') || waiting > active) return false;
     if ((status == PET_WORKING && (!active || waiting)) ||
         (status == PET_WAITING && !waiting) ||
-        ((status == PET_IDLE || status == PET_DONE || status == PET_OFFLINE) && active)) return false;
+        ((status == PET_IDLE || status == PET_DONE || status == PET_OFFLINE || status == PET_SYNCING) && active)) return false;
     *state = (pet_state_t){ .status = (pet_status_t)status, .active = active,
         .waiting = waiting, .received_ms = now_ms, .connected = true };
     return true;
@@ -61,6 +61,7 @@ pet_status_t pet_fallback_status(pet_status_t heartbeat, bool control_seen, bool
 pet_animation_t pet_animation(pet_status_t status) {
     switch (status) {
         case PET_OFFLINE: return (pet_animation_t){5, 3, 1, 700}; // Still, downcast face.
+        case PET_SYNCING: return (pet_animation_t){0, 0, 6, 220}; // Alert blink with animated sync dots.
         case PET_WORKING: return (pet_animation_t){7, 0, 6, 150};
         case PET_WAITING: return (pet_animation_t){6, 0, 6, 150};
         case PET_DONE: return (pet_animation_t){4, 0, 5, 150};
