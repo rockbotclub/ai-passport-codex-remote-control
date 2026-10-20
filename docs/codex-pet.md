@@ -65,8 +65,10 @@ to selection memory or retained after a bridge restart.
 Native draft controls require a unique project name and a matching project
 selector in the application shell. The native home heading picker is identified
 by its exact project name and renderer classes. It provides positive home-view
-evidence even if the sidebar retains saved-chat current markers. The labeled
-picker remains supported when there is no saved-chat current marker. Missing,
+evidence even if the sidebar retains saved-chat current markers. The compact
+home's labeled project combobox also provides that evidence: the installed
+composer utility bar renders it only without a follow-up chat. Ordinary labeled
+buttons remain supported when there is no saved-chat current marker. Missing,
 renamed, duplicate, conflicting or changed targets fail closed. The current selector binding
 uses the installed desktop's English and Simplified Chinese accessible labels. Projectless groups
 cannot create a project chat. Repeated or stale button commands cannot open or
@@ -91,13 +93,41 @@ feature acceptance. No firmware was flashed.
 
 The user confirmed native new-chat navigation but reported that holding Confirm
 returned `chat-not-found` before Doubao started. Logs showed no editor scan or
-button press. The previous detector required the labeled picker and rejected
-current sidebar markers, so it did not cover the installed native home heading
-picker. Host regressions now cover that picker with retained sidebar markers,
+button press. Follow-up diagnostics found one exact labeled popup selector and
+a retained sidebar marker, with no hero picker. The detector had incorrectly
+allowed that marker to veto a matching new-composer project combobox. Host
+regressions now cover the compact combobox and hero with retained sidebar markers,
 wrong names, conflicting selectors, duplicate pickers, dialogs, embedded
 browsers and saved-chat routes. Doubao startup failures and normal completion
 forward only fixed numeric discovery schemas; names and input contents are
 never logged. Physical first-message acceptance remains pending for this fix.
+The complete gate and independent firmware archive verification passed; final
+computer-side changes also passed the focused native and Doubao regressions.
+Validation-only archive: `build/firmware/824d18ec542c627c39516e56c41640ca06011e87782426793ca3fa44c7ce1b91/`.
+Matching ELF SHA-256: `11a665f95bce2b9adaa1550c060d091d3972625f8e59d22be62022754a74b0d3`.
+
+On 2026-10-18, a further hold-to-record failure showed zero matching project
+selectors and one conflicting selector immediately after native new-chat
+navigation. The bridge used the migrated app-server project ID, while the
+installed desktop deep-link handler still indexes `local-projects` by the
+original desktop ID. A metadata-only check found different IDs for all eight
+local projects. New-chat navigation now resolves that original ID through the
+saved host-specific migration mapping; card selection and chat membership keep
+the app-server ID. Missing or ambiguous mappings stop before navigation.
+The existing exact project/composer checks remain in place. This computer-side
+correction requires a bridge restart and a fresh new-chat gesture; physical
+project selection and hold/release/Send acceptance remain pending.
+
+Build: PASS (complete ESP-IDF 5.5.3 gate and independent archive verification).
+Host tests: PASS (complete host gate, 148 full-dependency bridge tests without
+skips, and read-only route resolution for all eight local projects with
+navigation mocked). Device tests: NOT RUN for the corrected new-chat flow.
+The updated bridge was restarted with the Doubao backend; the card authenticated
+and completed at least five encrypted synchronizations. No firmware was flashed.
+Unverified: physical project selection, dictation start/release and first-message
+Send. Validation-only archive and full-image SHA-256:
+`build/firmware/2accb5dc1d65d102540bc0770cb1d4f9ba41123e3502b2d19d0181a31ac0e6e7/`.
+Matching ELF SHA-256: `9a84e91cb98df2698ea8b5560e8817861337a4cabf59bc9290db339dd3d0e817`.
 
 ## Doubao PC dictation trial (2026-10-17)
 

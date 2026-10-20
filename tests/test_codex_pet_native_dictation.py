@@ -49,6 +49,7 @@ class NativeDictationTests(unittest.TestCase):
         desktop = Desktop()
         projects = [{'id': 'a &/中文', 'name': 'Alpha'}, {'id': 'b', 'name': 'Beta'}]
         with patch('interaction.sys.platform', 'darwin'), patch.object(desktop, 'projects', return_value=projects), \
+                patch.object(desktop, 'project_state', return_value={'local-projects': {'a &/中文': {}}}), \
                 patch('interaction.subprocess.run') as run, patch.object(desktop, '_ipc_socket') as ipc, \
                 patch.object(desktop, '_scan_sessions', return_value=[{'id': 'already-saved'}]):
             draft = desktop.open_new_chat('a &/中文')
@@ -57,6 +58,34 @@ class NativeDictationTests(unittest.TestCase):
         self.assertEqual(draft['project_id'], 'a &/中文')
         self.assertEqual(draft['baseline'], {'already-saved'})
         self.assertTrue(draft['id'].startswith('@new:')); ipc.assert_not_called()
+
+    def test_new_route_resolves_migrated_membership_to_native_project_id(self):
+        desktop = Desktop(root='/tmp/passport-project-id-test')
+        state = {'local-projects': {'desktop &/中文': {'name': 'Alpha'}},
+                 'app-server-project-id-by-legacy-project-id-by-host': {
+                     'local:' + str(desktop.root.resolve()): {'desktop &/中文': 'server-project'}}}
+        with patch('interaction.sys.platform', 'darwin'), \
+                patch.object(desktop, 'projects', return_value=[{'id': 'server-project', 'name': 'Alpha'}]), \
+                patch.object(desktop, 'project_state', return_value=state), \
+                patch.object(desktop, '_scan_sessions', return_value=[]), \
+                patch('interaction.subprocess.run') as run:
+            draft = desktop.open_new_chat('server-project')
+        self.assertEqual(run.call_args.args[0], ['open', '-b', 'com.openai.codex',
+            'codex://new?mode=codex&projectId=desktop%20%26%2F%E4%B8%AD%E6%96%87'])
+        self.assertEqual(draft['project_id'], 'server-project')
+
+    def test_new_rejects_missing_or_ambiguous_native_mapping_before_navigation(self):
+        desktop = Desktop()
+        for local in ({}, {'unrelated': {}}, {'old-a': {}, 'old-b': {}}):
+            state = {'local-projects': local,
+                     'app-server-project-id-by-legacy-project-id-by-host': {
+                         'local': {'old-a': 'server-project', 'old-b': 'server-project'}}}
+            with self.subTest(local=local), patch('interaction.sys.platform', 'darwin'), \
+                    patch.object(desktop, 'projects', return_value=[{'id': 'server-project', 'name': 'Alpha'}]), \
+                    patch.object(desktop, 'project_state', return_value=state), \
+                    patch.object(desktop, '_scan_sessions') as scan, patch('interaction.subprocess.run') as run:
+                with self.assertRaises(ValueError): desktop.open_new_chat('server-project')
+                scan.assert_not_called(); run.assert_not_called()
 
     def test_new_rejects_missing_project_duplicate_names_and_projectless_before_navigation(self):
         desktop = Desktop()

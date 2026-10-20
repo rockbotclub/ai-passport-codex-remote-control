@@ -44,7 +44,9 @@ COMPOSER_TIMING_FIELDS = frozenset({'setup_ms', 'target_ms', 'controls_ms', 'pre
 COMPOSER_CONTROL_FIELDS = frozenset({'editors', 'buttons', 'candidates', 'scan_complete',
     'submit_buttons', 'dictate_buttons', 'stop_buttons', 'resume_buttons', 'voice_buttons'})
 COMPOSER_DRAFT_FIELDS = frozenset({'draft_route_ok', 'draft_current_chat',
-    'draft_project_matches', 'draft_hero_matches', 'draft_project_conflicts', 'draft_scan_complete'})
+    'draft_project_matches', 'draft_hero_matches', 'draft_project_conflicts', 'draft_scan_complete',
+    'draft_buttons', 'draft_popups', 'draft_named_buttons', 'draft_partial_buttons', 'draft_hero_shapes',
+    'draft_popup_matches'})
 
 
 def report_composer_diagnostics(data):
@@ -222,10 +224,19 @@ class Desktop:
         name = next(item['name'] for item in self.projects() if item['id'] == project)
         if sum(item['name'] == name for item in self.projects()) != 1:
             raise ValueError('项目重名，请先在电脑上区分项目名称')
+        # Session membership uses app-server IDs after migration, but the
+        # installed new-thread deep-link handler indexes local-projects by its
+        # original desktop ID. Resolve only through the explicit saved mapping.
+        state = self.project_state()
+        native_projects = [identity for identity in state.get('local-projects', {})
+                           if self.project_id(identity, state) == project]
+        if len(native_projects) != 1:
+            raise ValueError('电脑端项目不可用')
+        native_project = native_projects[0]
         baseline = {session['id'] for session in self._scan_sessions()}
         # /threads/new with only projectId discards the project in the installed
         # desktop parser. /new uses its native project-aware newThread handler.
-        url = 'codex://new?mode=codex&projectId=' + quote(project, safe='')
+        url = 'codex://new?mode=codex&projectId=' + quote(native_project, safe='')
         subprocess.run(['open', '-b', 'com.openai.codex', url], check=True, timeout=5,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self._new_composer = {'id': '@new:' + uuid.uuid4().hex, 'title': '新会话',

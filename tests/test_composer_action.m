@@ -496,6 +496,25 @@ int main(void) {
         id popupHome = area(@"app://-/index.html", @[currentButton, popupHero, draftControls]);
         assert(chatAreas(@[popupHome], @"@new:one").count == 1);
         assert(pressAction(popupHome, @"@new:one", @"focus") == 0);
+        // The compact native home uses a labeled project combobox rather than
+        // a hero. Actual regression: one popup match plus retained chat marker.
+        NSMutableDictionary *projectPopup = [project mutableCopy];
+        projectPopup[@"AXRole"] = @"AXPopUpButton";
+        id compactHome = area(@"app://-/index.html", @[currentButton, projectPopup, draftControls]);
+        assert(chatAreas(@[compactHome], @"@new:one").count == 1);
+        assert(pressAction(compactHome, @"@new:one", @"focus") == 0);
+        assert([draftDiscovery[@"draft_popup_matches"] isEqual:@1]);
+        assert([draftDiscovery[@"draft_current_chat"] isEqual:@YES]);
+        assert([draftDiscovery[@"draft_hero_matches"] isEqual:@0]);
+        NSUInteger compactBefore = presses;
+        assert(pressAction(compactHome, @"@new:one", @"dictate-start") == 0);
+        assert(pressAction(compactHome, @"@new:one", @"dictate-stop") == 0);
+        assert(presses == compactBefore + 2); // Release never submits.
+        assert(pressComposer(compactHome, @"@new:one") == 0);
+        assert(presses == compactBefore + 3);
+        before = presses;
+        assert(chatAreas(@[area(@"app://-/local/one", @[projectPopup, draftControls])], @"@new:one").count == 0);
+        assert(chatAreas(@[area(@"app://-/index.html", @[projectPopup, projectPopup, draftControls])], @"@new:one").count == 0);
         assert(chatAreas(@[area(@"app://-/index.html", @[currentButton, hero, project, draftControls])],
                          @"@new:one").count == 1);
         assert(chatAreas(@[area(@"app://-/index.html", @[hero, button(@"Change project: Beta", YES), draftControls])],

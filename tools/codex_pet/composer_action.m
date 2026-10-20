@@ -194,7 +194,9 @@ static BOOL draftArea(id area, NSURL *url) {
     if (!draftProject.length) return NO;
     draftDiscovery = [@{@"draft_route_ok": @0, @"draft_current_chat": @0,
         @"draft_project_matches": @0, @"draft_hero_matches": @0,
-        @"draft_project_conflicts": @0, @"draft_scan_complete": @0} mutableCopy];
+        @"draft_project_conflicts": @0, @"draft_scan_complete": @0,
+        @"draft_buttons": @0, @"draft_popups": @0, @"draft_named_buttons": @0,
+        @"draft_partial_buttons": @0, @"draft_hero_shapes": @0, @"draft_popup_matches": @0} mutableCopy];
     NSString *route = [[url.fragment componentsSeparatedByString:@"?"] firstObject];
     if (route.length && ![route isEqual:@"/"]) return NO;
     if (![url.path isEqual:@"/"] && ![url.path isEqual:@"/index.html"] &&
@@ -208,7 +210,7 @@ static BOOL draftArea(id area, NSURL *url) {
                        [@"切换项目：" stringByAppendingString:draftProject],
                        [@"更改项目：" stringByAppendingString:draftProject]];
     NSMutableArray *pending = [children(area) mutableCopy];
-    NSUInteger matches = 0, heroes = 0, conflicts = 0, visited = 0;
+    NSUInteger matches = 0, heroes = 0, popupMatches = 0, conflicts = 0, visited = 0;
     while (pending.count) {
         if (++visited > 20000) return NO;
         id element = pending.lastObject;
@@ -219,11 +221,23 @@ static BOOL draftArea(id area, NSURL *url) {
         if ([role isEqual:@"AXWebArea"] || [role isEqual:@"AXDialog"] ||
                 [role isEqual:@"AXSheet"] || [node[@"AXSubrole"] isEqual:@"AXDialog"]) continue;
         if ([role isEqual:@"AXButton"] || [role isEqual:@"AXPopUpButton"]) {
+            NSString *roleKey = [role isEqual:@"AXButton"] ? @"draft_buttons" : @"draft_popups";
+            draftDiscovery[roleKey] = @([draftDiscovery[roleKey] unsignedIntegerValue] + 1);
             NSDictionary *names = attributes(element, @[@"AXTitle", @"AXDescription"]);
             if (!names) return NO;
+            BOOL named = NO, partial = NO;
+            for (id name in names.allValues) if ([name isKindOfClass:NSString.class]) {
+                named = named || [name isEqual:draftProject];
+                partial = partial || [name containsString:draftProject];
+            }
+            if (named) draftDiscovery[@"draft_named_buttons"] = @([draftDiscovery[@"draft_named_buttons"] unsignedIntegerValue] + 1);
+            if (partial) draftDiscovery[@"draft_partial_buttons"] = @([draftDiscovery[@"draft_partial_buttons"] unsignedIntegerValue] + 1);
             BOOL matching = [labels containsObject:names[@"AXTitle"] ?: NSNull.null] ||
                             [labels containsObject:names[@"AXDescription"] ?: NSNull.null];
-            if (matching) matches++;
+            if (matching) {
+                matches++;
+                if ([role isEqual:@"AXPopUpButton"]) popupMatches++;
+            }
             else for (NSString *name in names.allValues) {
                 if (![name isKindOfClass:NSString.class]) continue;
                 if ([name hasPrefix:@"Change project: "] || [name hasPrefix:@"切换项目："] ||
@@ -238,6 +252,7 @@ static BOOL draftArea(id area, NSURL *url) {
                 [classes containsObject:@"heading-xl"] &&
                 [classes containsObject:@"text-tertiary"] &&
                 [classes containsObject:@"select-none"];
+            if (hero) draftDiscovery[@"draft_hero_shapes"] = @([draftDiscovery[@"draft_hero_shapes"] unsignedIntegerValue] + 1);
             if (hero && ([names[@"AXTitle"] isEqual:draftProject] ||
                          [names[@"AXDescription"] isEqual:draftProject])) heroes++;
         }
@@ -247,12 +262,15 @@ static BOOL draftArea(id area, NSURL *url) {
     }
     draftDiscovery[@"draft_project_matches"] = @(matches);
     draftDiscovery[@"draft_hero_matches"] = @(heroes);
+    draftDiscovery[@"draft_popup_matches"] = @(popupMatches);
     draftDiscovery[@"draft_project_conflicts"] = @(conflicts);
     draftDiscovery[@"draft_scan_complete"] = @1;
-    // A current saved-chat marker requires positive native-home evidence.
+    // Native home evidence can be the hero or the project combobox. In the
+    // installed composer-utility-bar, that combobox is gated by !followUp; it
+    // selects the new chat's project, while sidebar current markers can persist.
     // Never relax an ordinary saved-chat lookup or accept a name by itself.
     return !conflicts && matches <= 1 && heroes <= 1 &&
-        (heroes == 1 || (!hasCurrentChat && matches == 1));
+        (heroes == 1 || popupMatches == 1 || (!hasCurrentChat && matches == 1));
 }
 
 static void reportDraftDiscovery(void) {
